@@ -240,7 +240,7 @@ static void child_crash_handler(int sig) {
     _exit(1);
 }
 
-static void child_process_midi(jp8000_shm_t *shm, jeLib::Device &device) {
+static void child_process_midi(jp8000_shm_t *shm, jeLib::Je8086 &je) {
     while (midi_fifo_available(shm) > 0) {
         int rd = shm->midi_read;
         int len = shm->midi_buf[rd];
@@ -254,17 +254,21 @@ static void child_process_midi(jp8000_shm_t *shm, jeLib::Device &device) {
         }
         shm->midi_read = rd;
 
-        /* Send MIDI to JE device */
-        std::vector<synthLib::SMidiEvent> midiIn;
-        if (len == 1)
-            midiIn.emplace_back(synthLib::MidiEventSource::Host, msg[0], 0, 0);
-        else if (len == 2)
-            midiIn.emplace_back(synthLib::MidiEventSource::Host, msg[0], msg[1], 0);
-        else
-            midiIn.emplace_back(synthLib::MidiEventSource::Host, msg[0], msg[1], msg[2]);
-        std::vector<synthLib::SMidiEvent> midiOut;
-        device.process({}, {}, 0, midiIn, midiOut);
+        /* Send MIDI via addMidiEvent (goes through rate limiter → Serial) */
+        synthLib::SMidiEvent ev(synthLib::MidiEventSource::Host,
+                                msg[0],
+                                len > 1 ? msg[1] : 0,
+                                len > 2 ? msg[2] : 0);
+        je.addMidiEvent(ev);
     }
+}
+
+/* Also try: send MIDI note directly via Serial for immediate testing.
+ * Call this once after boot to verify audio output works at all. */
+static void child_send_test_note(jeLib::Je8086 &je) {
+    /* Note-on C4 velocity 100 on channel 0 */
+    synthLib::SMidiEvent noteOn(synthLib::MidiEventSource::Host, 0x90, 60, 100);
+    je.addMidiEvent(noteOn);
 }
 
 static void child_main(jp8000_shm_t *shm) {
@@ -276,11 +280,8 @@ static void child_main(jp8000_shm_t *shm) {
 
     vlog("[child] started, pid=%d", (int)getpid());
 
-    /* Pin to core 3 */
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(3, &cpuset);
-    sched_setaffinity(0, sizeof(cpuset), &cpuset);
+    /* Don't pin cores during boot — let OS schedule freely.
+     * Core pinning happens after boot, before real-time DSP work. */
     baseLib::setFlushDenormalsToZero();
 
     /* 1. Load ROM */
@@ -301,136 +302,88 @@ static void child_main(jp8000_shm_t *shm) {
     }
     vlog("[child] ROM: %s", rom.getName().c_str());
 
-    /* 2. Create JE device */
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Creating device...");
-    synthLib::DeviceCreateParams params;
-    params.romData = rom.getData();
-    params.romName = rom.getName();
-    params.hostSamplerate = JE_INTERNAL_RATE;
-    params.preferredSamplerate = JE_INTERNAL_RATE;
-    params.homePath = std::string(roms_dir);
+    /* 2. Create Je8086 and try to load snapshot for instant boot */
+    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Creating emulator...");
+    std::string ramFile = std::string(roms_dir) + "/ram_dump.bin";
+    auto *je = new jeLib::Je8086(rom.getData(), ramFile);
 
-    jeLib::Device device(params);
-    if (!device.isValid()) {
-        snprintf((char*)shm->load_error, sizeof(shm->load_error), "Device creation failed");
-        shm->initialized = 1; shm->loading_complete = 1;
-        vlog("[child] device creation failed");
-        return;
-    }
-    device.setMasterVolume(7.0f);
-    vlog("[child] device created, clock=%llu Hz", (unsigned long long)device.getDspClockHz());
-
-    /* 3. Boot: run until LCD shows PERFORM */
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Booting DSP...");
-    constexpr size_t blocksize = JE_BLOCK_SIZE;
-    std::array<std::vector<float>, 2> outBufs;
-    synthLib::TAudioInputs inputs;
-    synthLib::TAudioOutputs outputs;
-    for (size_t i = 0; i < outBufs.size(); ++i) {
-        outBufs[i].resize(blocksize);
-        outputs[i] = outBufs[i].data();
+    if (je->hasDoneFactoryReset()) {
+        delete je;
+        je = new jeLib::Je8086(rom.getData(), ramFile);
     }
 
-    std::vector<synthLib::SMidiEvent> midiIn, midiOut;
-    jeLib::SysexRemoteControl sysexRemote;
-    bool bootFinished = false;
+    /* Try snapshot first — instant boot */
+    char snapPath[512];
+    snprintf(snapPath, sizeof(snapPath), "%s/roms/boot.snap", shm->module_dir);
+    if (je->loadSnapshot(snapPath)) {
+        vlog("[child] snapshot loaded from %s — instant boot!", snapPath);
+    } else {
+        /* Fall back to step-by-step boot (~30s) */
+        vlog("[child] no snapshot, booting from scratch...");
+        snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Booting DSP (first run)...");
 
-    sysexRemote.evLcdDdDataChanged.addListener([&](const std::array<char, 40>& _lcdContent) {
-        char lcd[41]{0};
-        for (size_t i = 0; i < _lcdContent.size(); ++i)
-            lcd[i] = _lcdContent[i] >= ' ' ? static_cast<char>(_lcdContent[i]) : ' ';
-        if (std::string(lcd).find("PERFORM") != std::string::npos)
-            bootFinished = true;
-    });
-
-    int bootBlocks = 0;
-    while (!bootFinished && bootBlocks < 100000) {
-        device.process(inputs, outputs, blocksize, midiIn, midiOut);
-        for (const auto& e : midiOut)
-            sysexRemote.receive(e);
-        midiOut.clear();
-        bootBlocks++;
-    }
-    vlog("[child] boot complete after %d blocks", bootBlocks);
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC child...");
-
-    /* 4. Set up fork-parallel mode */
-    /* Install GRAM produce callback BEFORE fork so both processes have it */
-    jeLib::devices::g_je_parallel_mode = 1;
-    jeLib::devices::g_je_gram_produce = [shm](const int32_t *gram) {
-        /* Spin-wait if ring full */
-        while (gram_ring_available(shm) >= JE_GRAM_RING_CAP - 1) {
-            if (shm->child_shutdown) return;
-            __asm__ volatile("yield" ::: "memory");
-        }
-        int wi = shm->gram_write & JE_GRAM_RING_MASK;
-        for (int k = 0; k < JE_GRAM_COUNT; k++)
-            shm->gram_ring[wi].gram[k] = gram[k];
-        __asm__ volatile("dmb ishst" ::: "memory");
-        shm->gram_write = (shm->gram_write + 1) % (JE_GRAM_RING_CAP * 2);
-        shm->parent_samples_produced++;
-    };
-
-    /* Fork ASIC child process */
-    pid_t asic_pid = fork();
-    if (asic_pid < 0) {
-        snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                 "ASIC fork failed: %s", strerror(errno));
-        shm->initialized = 1; shm->loading_complete = 1;
-        return;
-    }
-
-    if (asic_pid == 0) {
-        /* === ASIC CHILD: runs ASIC2+3 === */
-        g_vlog = nullptr;
-
-        /* Set up GRAM consume callback */
-        jeLib::devices::g_je_gram_consume = [shm](int32_t *gram) -> bool {
-            while (gram_ring_available(shm) < 1) {
-                if (shm->child_shutdown) return false;
-                __asm__ volatile("yield" ::: "memory");
-            }
-            int ri = shm->gram_read & JE_GRAM_RING_MASK;
-            __asm__ volatile("dmb ishld" ::: "memory");
-            for (int k = 0; k < JE_GRAM_COUNT; k++)
-                gram[k] = shm->gram_ring[ri].gram[k];
-            shm->gram_read = (shm->gram_read + 1) % (JE_GRAM_RING_CAP * 2);
-            return true;
-        };
-
-        /* Audio output → write int16_t stereo to audio ring */
-        device.getJe8086().getAsics().setPostSample([shm](int32_t left, int32_t right) {
-            if (audio_ring_free(shm) < 1) return; /* drop if full */
-            /* JE output is 24-bit signed in int32_t, scale to int16_t */
-            int32_t l = (left >> 8);
-            int32_t r = (right >> 8);
-            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-            int wr = shm->ring_write;
-            shm->audio_ring[wr * 2 + 0] = (int16_t)l;
-            shm->audio_ring[wr * 2 + 1] = (int16_t)r;
-            shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
-            shm->child_samples_produced++;
+        jeLib::SysexRemoteControl sysexRemote;
+        bool bootFinished = false;
+        sysexRemote.evLcdDdDataChanged.addListener([&](const std::array<char, 40>& _lcdContent) {
+            char lcd[41]{0};
+            for (size_t i = 0; i < _lcdContent.size(); ++i)
+                lcd[i] = _lcdContent[i] >= ' ' ? static_cast<char>(_lcdContent[i]) : ' ';
+            if (std::string(lcd).find("PERFORM") != std::string::npos)
+                bootFinished = true;
         });
 
-        /* Drive ASIC2+3 directly */
-        auto& asics = device.getJe8086().getAsics();
-        while (!shm->child_shutdown) {
-            if (!asics.processSampleAsic23()) break;
+        nice(19);
+        int bootSteps = 0;
+        while (!bootFinished && bootSteps < 50000000) {
+            je->step();
+            bootSteps++;
+            if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
+            std::vector<synthLib::SMidiEvent> midiOut;
+            je->readMidiOut(midiOut);
+            for (const auto& e : midiOut) sysexRemote.receive(e);
+            if (bootSteps % 1000 == 0) sched_yield();
+            if (bootSteps % 500000 == 0) {
+                vlog("[child] boot: step %dk", bootSteps / 1000);
+                snprintf((char*)shm->loading_status, sizeof(shm->loading_status),
+                         "Booting DSP... (%dk)", bootSteps / 1000);
+            }
         }
-        _exit(0);
+        nice(-19);
+        vlog("[child] boot complete after %d steps", bootSteps);
     }
+    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Starting DSP...");
 
-    /* === PARENT DSP: runs H8S + ASIC0+1 === */
-    vlog("[child] ASIC fork done, asic_pid=%d", (int)asic_pid);
+    /* Pin to core 2 */
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(2, &cpuset);
+    sched_setaffinity(0, sizeof(cpuset), &cpuset);
 
-    /* Pre-fill: run a few blocks to populate the audio ring */
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Pre-filling audio...");
-    for (int i = 0; i < 16; i++) {
-        device.process(inputs, outputs, blocksize, midiIn, midiOut);
-        midiOut.clear();
+    /* Mode 0: all 4 ASICs serial (no fork split).
+     * Slower (~0.37x RT) but validates the full audio path.
+     * postSample writes directly to the audio ring. */
+    jeLib::devices::g_je_parallel_mode = 0;
+    je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
+        if (audio_ring_free(shm) < 1) return;
+        int32_t l = left;
+        int32_t r = right;
+        if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+        int wr = shm->ring_write;
+        shm->audio_ring[wr * 2 + 0] = (int16_t)l;
+        shm->audio_ring[wr * 2 + 1] = (int16_t)r;
+        shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
+        shm->child_samples_produced++;
+    });
+
+    /* Pre-fill */
+    int prefill = 0;
+    while (audio_ring_available(shm) < 512 && prefill < 5000000) {
+        je->step();
+        if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
+        prefill++;
     }
-    vlog("[child] pre-fill done, audio_ring=%d", audio_ring_available(shm));
+    vlog("[child] pre-fill done, audio_ring=%d, steps=%d", audio_ring_available(shm), prefill);
 
     /* 5. Signal ready */
     shm->initialized = 1;
@@ -439,35 +392,20 @@ static void child_main(jp8000_shm_t *shm) {
     snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Ready");
     vlog("[child] READY");
 
-    /* 6. Main DSP loop — parent runs H8S + ASIC0+1 */
-    /* The JE device runs at 88200 Hz internally. We produce 88200 samples/sec
-     * of GRAM data. The ASIC child runs at the same rate and produces 88200
-     * int16_t stereo pairs per second. The parent's render_block reads these
-     * at 44100 Hz, decimating 2:1. */
+    /* 6. Main DSP loop — mode 0, all 4 ASICs serial.
+     * Will run at ~0.37x RT (not real-time) but validates audio path. */
     while (!shm->child_shutdown) {
-        child_process_midi(shm, device);
-
-        /* Throttle: don't overfill */
-        if (audio_ring_available(shm) >= AUDIO_RING_SIZE / 2) {
-            usleep(500);
+        if (audio_ring_available(shm) >= 6000) {
+            usleep(1000);
             continue;
         }
 
-        /* Run one block of audio through H8S + ASIC0+1 */
-        device.process(inputs, outputs, blocksize, midiIn, midiOut);
-        midiOut.clear();
+        child_process_midi(shm, *je);
+
+        je->step();
+        if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
         shm->child_alive++;
     }
-
-    /* Cleanup: kill ASIC child */
-    kill(asic_pid, SIGTERM);
-    for (int i = 0; i < 30; i++) {
-        int status;
-        if (waitpid(asic_pid, &status, WNOHANG) == asic_pid) break;
-        usleep(100000);
-    }
-    kill(asic_pid, SIGKILL);
-    waitpid(asic_pid, nullptr, 0);
 
     vlog("[child] exiting");
 }
@@ -478,6 +416,7 @@ static void child_main(jp8000_shm_t *shm) {
 
 static int fork_and_wait_child(jp8000_instance_t *inst) {
     jp8000_shm_t *shm = inst->shm;
+    fprintf(stderr, "JP-8000: fork_and_wait starting...\n");
     vlog("fork_and_wait: forking child for DSP...");
 
     pid_t pid = fork();
@@ -526,7 +465,10 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
 
 static void* boot_thread_func(void *arg) {
     jp8000_instance_t *inst = (jp8000_instance_t*)arg;
+    fprintf(stderr, "JP-8000: boot thread starting, module_dir=%s\n", inst->shm->module_dir);
     fork_and_wait_child(inst);
+    fprintf(stderr, "JP-8000: boot thread done, ready=%d error=%s\n",
+            inst->shm->child_ready, inst->shm->load_error);
     inst->boot_thread_running = 0;
     return nullptr;
 }
@@ -592,6 +534,9 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     if (!inst || !inst->shm || !inst->shm->initialized || len < 1) return;
     (void)source;
 
+    vlog("[midi] status=0x%02X d1=%d d2=%d len=%d",
+         msg[0], len > 1 ? msg[1] : 0, len > 2 ? msg[2] : 0, len);
+
     uint8_t modified[8];
     int n = len > 8 ? 8 : len;
     memcpy(modified, msg, n);
@@ -649,6 +594,21 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
     }
 
     jp8000_shm_t *shm = inst->shm;
+
+    /* Log first 5 calls then every ~10 seconds */
+    if (shm->render_count < 5 || shm->render_count % 3450 == 0) {
+        /* Sample a few values from the ring to check for non-zero audio */
+        int peek_avail = audio_ring_available(shm);
+        int16_t peek_l = 0, peek_r = 0;
+        if (peek_avail > 0) {
+            int ri = shm->ring_read;
+            peek_l = shm->audio_ring[ri * 2 + 0];
+            peek_r = shm->audio_ring[ri * 2 + 1];
+        }
+        vlog("[render] #%d frames=%d ring=%d ur=%d alive=%d prod=%lld peek=%d/%d",
+             shm->render_count, frames, audio_ring_available(shm), shm->underrun_count,
+             shm->child_alive, (long long)shm->child_samples_produced, peek_l, peek_r);
+    }
 
     /* The audio ring contains samples at 88200 Hz.
      * Output is 44100 Hz. Decimate 2:1 with simple averaging. */
