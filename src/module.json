@@ -1,0 +1,40 @@
+{
+    "id": "jp8000",
+    "name": "JP-8000",
+    "abbrev": "JP",
+    "version": "0.1.0",
+    "description": "Roland JP-8000 SuperSaw emulator (Gearmulator JE-8086)",
+    "author": "dsp56300/gearmulator (port: charlesvestal)",
+    "dsp": "dsp.so",
+    "api_version": 2,
+    "assets": {
+        "path": "roms",
+        "label": "ROMs",
+        "extensions": [
+            ".mid",
+            ".bin"
+        ],
+        "description": "Requires JP-8000 ROM files (.mid firmware dump). Place all 8 .mid files from the JP-8000 v1.5 firmware in the roms/ folder.",
+        "hint": "Uses fork-parallel processing (2 cores) for real-time emulation.",
+        "hint_url": "https://github.com/charlesvestal/schwung-jp8000",
+        "hint_url_label": "Read more"
+    },
+    "capabilities": {
+        "audio_out": true,
+        "audio_in": false,
+        "midi_in": true,
+        "midi_out": false,
+        "default_forward_channel": 1,
+        "chainable": true,
+        "component_type": "sound_generator"
+    },
+    "chain_params": [
+        {"key": "cutoff", "name": "Cutoff", "type": "int", "min": 0, "max": 127},
+        {"key": "resonance", "name": "Resonance", "type": "int", "min": 0, "max": 127},
+        {"key": "amp_attack", "name": "Amp Attack", "type": "int", "min": 0, "max": 127},
+        {"key": "amp_decay", "name": "Amp Decay", "type": "int", "min": 0, "max": 127},
+        {"key": "amp_sustain", "name": "Amp Sustain", "type": "int", "min": 0, "max": 127},
+        {"key": "amp_release", "name": "Amp Release", "type": "int", "min": 0, "max": 127},
+        {"key": "patch_volume", "name": "Volume", "type": "int", "min": 0, "max": 127}
+    ]
+}
