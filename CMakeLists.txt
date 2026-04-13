@@ -23,6 +23,15 @@ add_subdirectory(${GEARMULATOR_SOURCE}/baseLib ${CMAKE_BINARY_DIR}/baseLib)
 # Synth library (core device abstraction)
 add_subdirectory(${GEARMULATOR_SOURCE}/synthLib ${CMAKE_BINARY_DIR}/synthLib)
 
+# Libresample (sample rate conversion — transitive dep of synthLib)
+add_subdirectory(${GEARMULATOR_SOURCE}/libresample ${CMAKE_BINARY_DIR}/libresample)
+
+# Hardware library (needed by jeLib for H8S emulation)
+add_subdirectory(${GEARMULATOR_SOURCE}/hardwareLib ${CMAKE_BINARY_DIR}/hardwareLib)
+
+# MC68k emulator (needed by hardwareLib)
+add_subdirectory(${GEARMULATOR_SOURCE}/mc68k ${CMAKE_BINARY_DIR}/mc68k)
+
 # Ronaldo / JE-8086 (JP-8000) dependencies
 add_subdirectory(${GEARMULATOR_SOURCE}/ronaldo/common ${CMAKE_BINARY_DIR}/rLib)
 add_subdirectory(${GEARMULATOR_SOURCE}/ronaldo/esp ${CMAKE_BINARY_DIR}/esp)
