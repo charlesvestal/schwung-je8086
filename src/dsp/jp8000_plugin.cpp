@@ -149,6 +149,13 @@ struct jp8000_shm_t {
     volatile int midi_read;
     volatile int midi_write;
 
+    /* uC write ring: parent forwards ASIC2/3 writes, child applies them.
+     * Each entry: [asic(1 byte), addr_hi, addr_lo, value] = 4 bytes */
+    #define UC_WRITE_RING_CAP 4096
+    uint8_t uc_write_ring[UC_WRITE_RING_CAP * 4];
+    volatile int uc_write_read;
+    volatile int uc_write_write;
+
     /* Control */
     volatile int child_ready;
     volatile int child_shutdown;
@@ -198,6 +205,23 @@ static int midi_fifo_available(jp8000_shm_t *shm) {
 
 static int midi_fifo_free(jp8000_shm_t *shm) {
     return MIDI_FIFO_SIZE - 1 - midi_fifo_available(shm);
+}
+
+static int uc_write_ring_available(jp8000_shm_t *shm) {
+    int avail = shm->uc_write_write - shm->uc_write_read;
+    if (avail < 0) avail += UC_WRITE_RING_CAP;
+    return avail;
+}
+
+static void uc_write_ring_push(jp8000_shm_t *shm, int asic, uint32_t addr, uint8_t val) {
+    if (uc_write_ring_available(shm) >= UC_WRITE_RING_CAP - 1) return; /* drop if full */
+    int wi = shm->uc_write_write;
+    int off = wi * 4;
+    shm->uc_write_ring[off + 0] = (uint8_t)asic;
+    shm->uc_write_ring[off + 1] = (uint8_t)(addr >> 8);
+    shm->uc_write_ring[off + 2] = (uint8_t)(addr & 0xFF);
+    shm->uc_write_ring[off + 3] = val;
+    shm->uc_write_write = (wi + 1) % UC_WRITE_RING_CAP;
 }
 
 static void midi_fifo_push(jp8000_shm_t *shm, const uint8_t *msg, int len) {
@@ -351,30 +375,103 @@ static void child_main(jp8000_shm_t *shm) {
         nice(-19);
         vlog("[child] boot complete after %d steps", bootSteps);
     }
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Starting DSP...");
+    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC child...");
 
-    /* Pin to core 2 */
+    /* Fork ASIC child — mode stays 0 until after fork */
+    pid_t asic_pid = fork();
+    if (asic_pid < 0) {
+        snprintf((char*)shm->load_error, sizeof(shm->load_error),
+                 "ASIC fork failed: %s", strerror(errno));
+        shm->initialized = 1; shm->loading_complete = 1;
+        return;
+    }
+
+    if (asic_pid == 0) {
+        /* === ASIC CHILD: runs ASIC2+3 === */
+        g_vlog = nullptr;
+        cpu_set_t cs;
+        CPU_ZERO(&cs);
+        CPU_SET(3, &cs);
+        sched_setaffinity(0, sizeof(cs), &cs);
+
+        /* GRAM consume */
+        jeLib::devices::g_je_gram_consume = [shm](int32_t *gram) -> bool {
+            while (gram_ring_available(shm) < 1) {
+                if (shm->child_shutdown) return false;
+                usleep(10);
+            }
+            int ri = shm->gram_read & JE_GRAM_RING_MASK;
+            for (int k = 0; k < JE_GRAM_COUNT; k++)
+                gram[k] = shm->gram_ring[ri].gram[k];
+            shm->gram_read = (shm->gram_read + 1) % (JE_GRAM_RING_CAP * 2);
+            return true;
+        };
+
+        /* Audio output to ring */
+        je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
+            if (audio_ring_free(shm) < 1) return;
+            int32_t l = left, r = right;
+            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+            int wr = shm->ring_write;
+            shm->audio_ring[wr * 2 + 0] = (int16_t)l;
+            shm->audio_ring[wr * 2 + 1] = (int16_t)r;
+            shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
+            shm->child_samples_produced++;
+        });
+
+        /* ASIC2+3 loop: consume GRAM + apply forwarded uC writes */
+        auto& asics = je->getAsics();
+        while (!shm->child_shutdown) {
+            /* Apply any pending uC writes from parent (PRAM updates for ASIC2/3) */
+            while (uc_write_ring_available(shm) > 0) {
+                int ri = shm->uc_write_read;
+                int off = ri * 4;
+                int asic = shm->uc_write_ring[off + 0];
+                uint32_t addr = ((uint32_t)shm->uc_write_ring[off + 1] << 8) |
+                                shm->uc_write_ring[off + 2];
+                uint8_t val = shm->uc_write_ring[off + 3];
+                shm->uc_write_read = (ri + 1) % UC_WRITE_RING_CAP;
+                asics.applyUcWrite(asic, addr, val);
+            }
+
+            if (!asics.processSampleAsic23()) break;
+        }
+        _exit(0);
+    }
+
+    /* === PARENT DSP: H8S + ASIC0+1 === */
+    vlog("[child] ASIC fork done, asic_pid=%d", (int)asic_pid);
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(2, &cpuset);
     sched_setaffinity(0, sizeof(cpuset), &cpuset);
 
-    /* Mode 0: all 4 ASICs serial (no fork split).
-     * Slower (~0.37x RT) but validates the full audio path.
-     * postSample writes directly to the audio ring. */
-    jeLib::devices::g_je_parallel_mode = 0;
-    je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
-        if (audio_ring_free(shm) < 1) return;
-        int32_t l = left;
-        int32_t r = right;
-        if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-        if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-        int wr = shm->ring_write;
-        shm->audio_ring[wr * 2 + 0] = (int16_t)l;
-        shm->audio_ring[wr * 2 + 1] = (int16_t)r;
-        shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
-        shm->child_samples_produced++;
-    });
+    /* Wait for child to be ready (it starts blocked on gram_consume) */
+    usleep(50000);
+
+    /* Switch to mode 1 + install callbacks */
+    jeLib::devices::g_je_parallel_mode = 1;
+    jeLib::devices::g_je_gram_produce = [shm](const int32_t *gram) {
+        while (gram_ring_available(shm) >= JE_GRAM_RING_CAP - 1) {
+            if (shm->child_shutdown) return;
+            usleep(10);
+        }
+        int wi = shm->gram_write & JE_GRAM_RING_MASK;
+        for (int k = 0; k < JE_GRAM_COUNT; k++)
+            shm->gram_ring[wi].gram[k] = gram[k];
+        shm->gram_write = (shm->gram_write + 1) % (JE_GRAM_RING_CAP * 2);
+        shm->parent_samples_produced++;
+    };
+    /* Forward ASIC2/3 uC writes to child */
+    static int uc_write_count = 0;
+    jeLib::devices::g_je_uc_write_forward = [shm](int asic, uint32_t addr, uint8_t val) {
+        uc_write_ring_push(shm, asic, addr, val);
+        uc_write_count++;
+        if (uc_write_count <= 20 || uc_write_count % 10000 == 0)
+            vlog("[uc-fwd] #%d asic=%d addr=0x%04x val=0x%02x", uc_write_count, asic, addr, val);
+    };
+    vlog("[child] parallel mode 1 active, uC write forwarding enabled");
 
     /* Pre-fill */
     int prefill = 0;
@@ -392,8 +489,8 @@ static void child_main(jp8000_shm_t *shm) {
     snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Ready");
     vlog("[child] READY");
 
-    /* 6. Main DSP loop — mode 0, all 4 ASICs serial.
-     * Will run at ~0.37x RT (not real-time) but validates audio path. */
+    /* 6. Main DSP loop — mode 1, H8S + ASIC0+1.
+     * GRAM → child, uC writes → child, audio ← child. */
     while (!shm->child_shutdown) {
         if (audio_ring_available(shm) >= 6000) {
             usleep(1000);
@@ -406,6 +503,16 @@ static void child_main(jp8000_shm_t *shm) {
         if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
         shm->child_alive++;
     }
+
+    /* Cleanup ASIC child */
+    kill(asic_pid, SIGTERM);
+    for (int i = 0; i < 30; i++) {
+        int status;
+        if (waitpid(asic_pid, &status, WNOHANG) == asic_pid) break;
+        usleep(100000);
+    }
+    kill(asic_pid, SIGKILL);
+    waitpid(asic_pid, nullptr, 0);
 
     vlog("[child] exiting");
 }
