@@ -80,3 +80,12 @@ target_link_libraries(bench_je_fork PRIVATE jeLib synthLib baseLib)
 if(NOT APPLE)
     target_link_options(bench_je_fork PRIVATE -static-libstdc++ -static-libgcc)
 endif()
+
+# ---- Snapshot tool ----
+
+add_executable(je_snapshot src/tools/je_snapshot.cpp)
+target_include_directories(je_snapshot PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(je_snapshot PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(je_snapshot PRIVATE -static-libstdc++ -static-libgcc)
+endif()
