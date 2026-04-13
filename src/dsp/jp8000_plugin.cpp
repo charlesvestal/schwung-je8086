@@ -93,6 +93,17 @@ typedef struct plugin_api_v2 {
 #define JE_GRAM_RING_MASK   (JE_GRAM_RING_CAP - 1)
 #define JE_GRAM_COUNT       6
 
+/* ARM memory barriers for cross-process SPSC ring buffers.
+ * Without these, ARM's weak memory ordering lets the index update
+ * become visible before the data writes, causing torn reads. */
+#ifdef __aarch64__
+#define SHM_STORE_FENCE() __asm__ volatile("dmb ishst" ::: "memory")
+#define SHM_LOAD_FENCE()  __asm__ volatile("dmb ishld" ::: "memory")
+#else
+#define SHM_STORE_FENCE() __asm__ volatile("" ::: "memory")
+#define SHM_LOAD_FENCE()  __asm__ volatile("" ::: "memory")
+#endif
+
 static const host_api_v1_t *g_host = nullptr;
 
 static int64_t now_us() {
@@ -175,6 +186,11 @@ struct jp8000_shm_t {
     volatile int render_count;
     volatile int64_t child_samples_produced;
     volatile int64_t parent_samples_produced;
+
+    /* ASIC2/3 readback register forwarding: child → parent.
+     * The H8S in the parent reads these instead of stale local copies. */
+    volatile uint8_t asic2_readback[4];
+    volatile uint8_t asic3_readback[4];
 };
 
 /* =====================================================================
@@ -221,6 +237,7 @@ static void uc_write_ring_push(jp8000_shm_t *shm, int asic, uint32_t addr, uint8
     shm->uc_write_ring[off + 1] = (uint8_t)(addr >> 8);
     shm->uc_write_ring[off + 2] = (uint8_t)(addr & 0xFF);
     shm->uc_write_ring[off + 3] = val;
+    SHM_STORE_FENCE();
     shm->uc_write_write = (wi + 1) % UC_WRITE_RING_CAP;
 }
 
@@ -234,6 +251,7 @@ static void midi_fifo_push(jp8000_shm_t *shm, const uint8_t *msg, int len) {
         shm->midi_buf[wr] = msg[i];
         wr = (wr + 1) % MIDI_FIFO_SIZE;
     }
+    SHM_STORE_FENCE();
     shm->midi_write = wr;
 }
 
@@ -375,6 +393,23 @@ static void child_main(jp8000_shm_t *shm) {
         nice(-19);
         vlog("[child] boot complete after %d steps", bootSteps);
     }
+    /* Warm up: run DSP in serial mode (mode 0) to settle the snapshot transient.
+     * The snapshot state produces a large transient when processing first resumes.
+     * Running ~3 seconds of audio silently lets filters/delay lines settle. */
+    {
+        int warmup_samples = 0;
+        snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Settling DSP...");
+        vlog("[child] warming up DSP (serial mode 0) to settle snapshot transient...");
+        for (int i = 0; i < 15000000 && warmup_samples < 88200 * 3; i++) {
+            je->step();
+            if (!je->getSampleBuffer().empty()) {
+                warmup_samples += (int)je->getSampleBuffer().size();
+                je->clearSampleBuffer();
+            }
+        }
+        vlog("[child] warm-up done: %d samples (~%.1fs)", warmup_samples, warmup_samples / 88200.0);
+    }
+
     snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC child...");
 
     /* Fork ASIC child — mode stays 0 until after fork */
@@ -393,6 +428,7 @@ static void child_main(jp8000_shm_t *shm) {
         CPU_ZERO(&cs);
         CPU_SET(3, &cs);
         sched_setaffinity(0, sizeof(cs), &cs);
+        baseLib::setFlushDenormalsToZero();
 
         /* GRAM consume */
         jeLib::devices::g_je_gram_consume = [shm](int32_t *gram) -> bool {
@@ -400,6 +436,7 @@ static void child_main(jp8000_shm_t *shm) {
                 if (shm->child_shutdown) return false;
                 usleep(10);
             }
+            SHM_LOAD_FENCE();
             int ri = shm->gram_read & JE_GRAM_RING_MASK;
             for (int k = 0; k < JE_GRAM_COUNT; k++)
                 gram[k] = shm->gram_ring[ri].gram[k];
@@ -416,15 +453,16 @@ static void child_main(jp8000_shm_t *shm) {
             int wr = shm->ring_write;
             shm->audio_ring[wr * 2 + 0] = (int16_t)l;
             shm->audio_ring[wr * 2 + 1] = (int16_t)r;
+            SHM_STORE_FENCE();
             shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
             shm->child_samples_produced++;
         });
 
-        /* ASIC2+3 loop: consume GRAM + apply forwarded uC writes */
+        /* ASIC2+3 loop */
         auto& asics = je->getAsics();
         while (!shm->child_shutdown) {
-            /* Apply any pending uC writes from parent (PRAM updates for ASIC2/3) */
             while (uc_write_ring_available(shm) > 0) {
+                SHM_LOAD_FENCE();
                 int ri = shm->uc_write_read;
                 int off = ri * 4;
                 int asic = shm->uc_write_ring[off + 0];
@@ -436,6 +474,10 @@ static void child_main(jp8000_shm_t *shm) {
             }
 
             if (!asics.processSampleAsic23()) break;
+
+            asics.getAsic23Readback(
+                (uint8_t*)shm->asic2_readback,
+                (uint8_t*)shm->asic3_readback);
         }
         _exit(0);
     }
@@ -447,10 +489,8 @@ static void child_main(jp8000_shm_t *shm) {
     CPU_SET(2, &cpuset);
     sched_setaffinity(0, sizeof(cpuset), &cpuset);
 
-    /* Wait for child to be ready (it starts blocked on gram_consume) */
     usleep(50000);
 
-    /* Switch to mode 1 + install callbacks */
     jeLib::devices::g_je_parallel_mode = 1;
     jeLib::devices::g_je_gram_produce = [shm](const int32_t *gram) {
         while (gram_ring_available(shm) >= JE_GRAM_RING_CAP - 1) {
@@ -460,10 +500,10 @@ static void child_main(jp8000_shm_t *shm) {
         int wi = shm->gram_write & JE_GRAM_RING_MASK;
         for (int k = 0; k < JE_GRAM_COUNT; k++)
             shm->gram_ring[wi].gram[k] = gram[k];
+        SHM_STORE_FENCE();
         shm->gram_write = (shm->gram_write + 1) % (JE_GRAM_RING_CAP * 2);
         shm->parent_samples_produced++;
     };
-    /* Forward ASIC2/3 uC writes to child */
     static int uc_write_count = 0;
     jeLib::devices::g_je_uc_write_forward = [shm](int asic, uint32_t addr, uint8_t val) {
         uc_write_ring_push(shm, asic, addr, val);
@@ -471,26 +511,27 @@ static void child_main(jp8000_shm_t *shm) {
         if (uc_write_count <= 20 || uc_write_count % 10000 == 0)
             vlog("[uc-fwd] #%d asic=%d addr=0x%04x val=0x%02x", uc_write_count, asic, addr, val);
     };
-    vlog("[child] parallel mode 1 active, uC write forwarding enabled");
+    vlog("[child] parallel mode 1 active");
 
     /* Pre-fill */
     int prefill = 0;
     while (audio_ring_available(shm) < 512 && prefill < 5000000) {
+        je->getAsics().setAsic23Readback(
+            (const uint8_t*)shm->asic2_readback,
+            (const uint8_t*)shm->asic3_readback);
         je->step();
         if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
         prefill++;
     }
     vlog("[child] pre-fill done, audio_ring=%d, steps=%d", audio_ring_available(shm), prefill);
 
-    /* 5. Signal ready */
     shm->initialized = 1;
     shm->loading_complete = 1;
     shm->child_ready = 1;
     snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Ready");
     vlog("[child] READY");
 
-    /* 6. Main DSP loop — mode 1, H8S + ASIC0+1.
-     * GRAM → child, uC writes → child, audio ← child. */
+    /* Main DSP loop */
     while (!shm->child_shutdown) {
         if (audio_ring_available(shm) >= 6000) {
             usleep(1000);
@@ -499,12 +540,15 @@ static void child_main(jp8000_shm_t *shm) {
 
         child_process_midi(shm, *je);
 
+        je->getAsics().setAsic23Readback(
+            (const uint8_t*)shm->asic2_readback,
+            (const uint8_t*)shm->asic3_readback);
+
         je->step();
         if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
         shm->child_alive++;
     }
 
-    /* Cleanup ASIC child */
     kill(asic_pid, SIGTERM);
     for (int i = 0; i < 30; i++) {
         int status;
@@ -719,6 +763,7 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
 
     /* The audio ring contains samples at 88200 Hz.
      * Output is 44100 Hz. Decimate 2:1 with simple averaging. */
+    SHM_LOAD_FENCE();  /* ensure we see audio data written before ring_write */
     int avail = audio_ring_available(shm);
     int needed = frames * 2; /* 2 input samples per 1 output sample */
     int to_read = (avail < needed) ? avail : needed;
