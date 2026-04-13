@@ -35,11 +35,26 @@ int main(int argc, char* argv[]) {
     }
 
     const char *romDir = argv[1];
+
+    /* Resolve paths BEFORE chdir */
+    char abspath[4096];
+    std::string resolvedDir;
+    if (realpath(romDir, abspath))
+        resolvedDir = abspath;
+    else
+        resolvedDir = romDir;
+
     std::string outputPath;
     if (argc >= 3) {
-        outputPath = argv[2];
+        if (argv[2][0] == '/')
+            outputPath = argv[2];
+        else {
+            char cwd[4096];
+            getcwd(cwd, sizeof(cwd));
+            outputPath = std::string(cwd) + "/" + argv[2];
+        }
     } else {
-        outputPath = std::string(romDir) + "/boot.snap";
+        outputPath = resolvedDir + "/boot.snap";
     }
 
 #ifdef __linux__
@@ -49,14 +64,6 @@ int main(int argc, char* argv[]) {
     sched_setaffinity(0, sizeof(cpuset), &cpuset);
 #endif
     baseLib::setFlushDenormalsToZero();
-
-    /* Load ROM */
-    char abspath[4096];
-    std::string resolvedDir;
-    if (realpath(romDir, abspath))
-        resolvedDir = abspath;
-    else
-        resolvedDir = romDir;
 
     (void)chdir(romDir);
     synthLib::RomLoader::addSearchPath(resolvedDir);
@@ -114,6 +121,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     printf("Boot complete after %d steps (%.1fs)\n", steps, elapsed);
+
+    /* Send a test note and let it ring for a moment to verify MIDI works */
+    printf("Sending test note (C4)...\n");
+    {
+        synthLib::SMidiEvent noteOn(synthLib::MidiEventSource::Host, 0x90, 60, 100);
+        je->addMidiEvent(noteOn);
+        /* Step enough for the note to propagate through rate limiter + DSP */
+        for (int i = 0; i < 500000; i++) {
+            je->step();
+            if (!je->getSampleBuffer().empty()) {
+                auto& buf = je->getSampleBuffer();
+                if (i == 400000 && !buf.empty()) {
+                    printf("  Audio sample at step 400k: L=%d R=%d\n",
+                           buf.back().first, buf.back().second);
+                }
+                je->clearSampleBuffer();
+            }
+        }
+        printf("  Note stepped 500k times.\n");
+        /* Note-off so snapshot is clean */
+        synthLib::SMidiEvent noteOff(synthLib::MidiEventSource::Host, 0x80, 60, 0);
+        je->addMidiEvent(noteOff);
+        for (int i = 0; i < 100000; i++) {
+            je->step();
+            if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
+        }
+        printf("  Note off + 100k steps done.\n");
+    }
 
     /* Save snapshot */
     printf("Saving snapshot to %s...\n", outputPath.c_str());
