@@ -393,21 +393,19 @@ static void child_main(jp8000_shm_t *shm) {
         nice(-19);
         vlog("[child] boot complete after %d steps", bootSteps);
     }
-    /* Warm up: run DSP in serial mode (mode 0) to settle the snapshot transient.
-     * The snapshot state produces a large transient when processing first resumes.
-     * Running ~3 seconds of audio silently lets filters/delay lines settle. */
+    /* Warm-up: run serial mode 0 for ~2s after snapshot load so H8S/DSP
+     * state stabilizes before switching to fork-parallel mode. */
     {
         int warmup_samples = 0;
-        snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Settling DSP...");
-        vlog("[child] warming up DSP (serial mode 0) to settle snapshot transient...");
-        for (int i = 0; i < 15000000 && warmup_samples < 88200 * 3; i++) {
+        vlog("[child] warming up DSP (serial mode 0) for ~2s...");
+        for (int i = 0; i < 50000000 && warmup_samples < 88200 * 2; i++) {
             je->step();
-            if (!je->getSampleBuffer().empty()) {
-                warmup_samples += (int)je->getSampleBuffer().size();
-                je->clearSampleBuffer();
-            }
+            auto& buf = je->getSampleBuffer();
+            warmup_samples += (int)buf.size();
+            if (!buf.empty()) je->clearSampleBuffer();
         }
-        vlog("[child] warm-up done: %d samples (~%.1fs)", warmup_samples, warmup_samples / 88200.0);
+        vlog("[child] warm-up done: %d samples (~%.1fs)", warmup_samples,
+             warmup_samples / 88200.0);
     }
 
     snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC child...");
@@ -444,10 +442,19 @@ static void child_main(jp8000_shm_t *shm) {
             return true;
         };
 
-        /* Audio output to ring */
+        /* Audio output to ring.
+         * asic3 emits 24-bit signed samples in an int32 container
+         * (range ±2^23). The Device path does `dsp2sample<float>(s) *
+         * masterVolume`. Equivalent here: shift down 8 bits, then apply
+         * an integer gain so the result lands in int16 range. With
+         * OUTPUT_GAIN = 0.5 (master vol headroom), full-scale 24-bit
+         * becomes ±16384 in int16 — plenty of headroom, no clipping. */
         je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
             if (audio_ring_free(shm) < 1) return;
-            int32_t l = left, r = right;
+            constexpr int32_t GAIN_NUM = 1;  /* OUTPUT_GAIN 0.5 = 1/2 of >> 8 */
+            constexpr int32_t SHIFT = 9;     /* >>8 (24→16) + >>1 (0.5x) */
+            int32_t l = (left * GAIN_NUM) >> SHIFT;
+            int32_t r = (right * GAIN_NUM) >> SHIFT;
             if (l > 32767) l = 32767; if (l < -32768) l = -32768;
             if (r > 32767) r = 32767; if (r < -32768) r = -32768;
             int wr = shm->ring_write;
