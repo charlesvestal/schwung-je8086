@@ -89,3 +89,28 @@ target_link_libraries(je_snapshot PRIVATE jeLib synthLib baseLib)
 if(NOT APPLE)
     target_link_options(je_snapshot PRIVATE -static-libstdc++ -static-libgcc)
 endif()
+
+# ---- whine_compare diagnostic harness ----
+
+add_executable(whine_compare src/tools/whine_compare.cpp)
+target_include_directories(whine_compare PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(whine_compare PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(whine_compare PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+add_executable(audio_probe src/tools/audio_probe.cpp)
+target_include_directories(audio_probe PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(audio_probe PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(audio_probe PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# ---- jeTestConsole (built from our source) ----
+add_executable(je_test_console
+    ${GEARMULATOR_SOURCE}/ronaldo/je8086/jeTestConsole/jeTestConsole.cpp)
+target_include_directories(je_test_console PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(je_test_console PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(je_test_console PRIVATE -static-libstdc++ -static-libgcc)
+endif()

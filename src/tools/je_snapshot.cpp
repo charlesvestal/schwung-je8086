@@ -122,33 +122,18 @@ int main(int argc, char* argv[]) {
     }
     printf("Boot complete after %d steps (%.1fs)\n", steps, elapsed);
 
-    /* Send a test note and let it ring for a moment to verify MIDI works */
-    printf("Sending test note (C4)...\n");
-    {
-        synthLib::SMidiEvent noteOn(synthLib::MidiEventSource::Host, 0x90, 60, 100);
-        je->addMidiEvent(noteOn);
-        /* Step enough for the note to propagate through rate limiter + DSP */
-        for (int i = 0; i < 500000; i++) {
-            je->step();
-            if (!je->getSampleBuffer().empty()) {
-                auto& buf = je->getSampleBuffer();
-                if (i == 400000 && !buf.empty()) {
-                    printf("  Audio sample at step 400k: L=%d R=%d\n",
-                           buf.back().first, buf.back().second);
-                }
-                je->clearSampleBuffer();
-            }
-        }
-        printf("  Note stepped 500k times.\n");
-        /* Note-off so snapshot is clean */
-        synthLib::SMidiEvent noteOff(synthLib::MidiEventSource::Host, 0x80, 60, 0);
-        je->addMidiEvent(noteOff);
-        for (int i = 0; i < 100000; i++) {
-            je->step();
-            if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
-        }
-        printf("  Note off + 100k steps done.\n");
+    /* Settle: run silently for ~2s so DSP state is at a quiet steady state
+     * (filters/delays settle to whatever the default patch's resting state is).
+     * No test note — saved state should be silent until MIDI arrives. */
+    printf("Settling DSP silently (2s)...\n");
+    int settled = 0;
+    while (settled < 88200 * 2) {
+        je->step();
+        auto& buf = je->getSampleBuffer();
+        settled += (int)buf.size();
+        if (!buf.empty()) je->clearSampleBuffer();
     }
+    printf("  Settled %d samples.\n", settled);
 
     /* Save snapshot */
     printf("Saving snapshot to %s...\n", outputPath.c_str());
