@@ -1,0 +1,9 @@
+# C major triad attack + decay
+render_seconds 4
+0     pc 0
+100   on 60 100
+100   on 64 100
+100   on 67 100
+2000  off 60
+2000  off 64
+2000  off 67

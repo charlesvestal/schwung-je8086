@@ -122,10 +122,24 @@ static void plugin_log(const char *fmt, ...) {
     g_host->log(buf);
 }
 
+/* Pin the calling process to a core. Linux-only; no-op elsewhere so the
+ * plugin can be built and exercised natively on macOS for testing. */
+static void pin_to_core(int core) {
+#ifdef __linux__
+    cpu_set_t cs;
+    CPU_ZERO(&cs);
+    CPU_SET(core, &cs);
+    sched_setaffinity(0, sizeof(cs), &cs);
+#else
+    (void)core;
+#endif
+}
+
 static FILE *g_vlog = nullptr;
 static void vlog(const char *fmt, ...) {
     if (!g_vlog) {
         g_vlog = fopen("/data/UserData/jp8000_debug.log", "a");
+        if (!g_vlog) g_vlog = fopen("/tmp/jp8000_debug.log", "a");
         if (!g_vlog) return;
     }
     va_list ap;
@@ -422,10 +436,7 @@ static void child_main(jp8000_shm_t *shm) {
     if (asic_pid == 0) {
         /* === ASIC CHILD: runs ASIC2+3 === */
         g_vlog = nullptr;
-        cpu_set_t cs;
-        CPU_ZERO(&cs);
-        CPU_SET(3, &cs);
-        sched_setaffinity(0, sizeof(cs), &cs);
+        pin_to_core(3);
         baseLib::setFlushDenormalsToZero();
 
         /* GRAM consume */
@@ -444,15 +455,16 @@ static void child_main(jp8000_shm_t *shm) {
 
         /* Audio output to ring.
          * asic3 emits 24-bit signed samples in an int32 container
-         * (range ±2^23). The Device path does `dsp2sample<float>(s) *
-         * masterVolume`. Equivalent here: shift down 8 bits, then apply
-         * an integer gain so the result lands in int16 range. With
-         * OUTPUT_GAIN = 0.5 (master vol headroom), full-scale 24-bit
-         * becomes ±16384 in int16 — plenty of headroom, no clipping. */
+         * (range ±2^23). The Device/JUCE path does `dsp2sample<float>(s)
+         * * masterVolume` with a default master volume of 12.0:
+         *   int16 = s / 2^23 * 12 * 2^15 = s * 12/256 ≈ (s*3)>>6.
+         * The synth's own output level provides the headroom (the DAC
+         * output never approaches 24-bit full scale), same as on the
+         * JUCE plugin; clamp guards the rest. */
         je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
             if (audio_ring_free(shm) < 1) return;
-            constexpr int32_t GAIN_NUM = 1;  /* OUTPUT_GAIN 0.5 = 1/2 of >> 8 */
-            constexpr int32_t SHIFT = 9;     /* >>8 (24→16) + >>1 (0.5x) */
+            constexpr int32_t GAIN_NUM = 3;  /* *3 >>6 ≈ JUCE master vol 12.0 */
+            constexpr int32_t SHIFT = 6;
             int32_t l = (left * GAIN_NUM) >> SHIFT;
             int32_t r = (right * GAIN_NUM) >> SHIFT;
             if (l > 32767) l = 32767; if (l < -32768) l = -32768;
@@ -491,10 +503,7 @@ static void child_main(jp8000_shm_t *shm) {
 
     /* === PARENT DSP: H8S + ASIC0+1 === */
     vlog("[child] ASIC fork done, asic_pid=%d", (int)asic_pid);
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(2, &cpuset);
-    sched_setaffinity(0, sizeof(cpuset), &cpuset);
+    pin_to_core(2);
 
     usleep(50000);
 

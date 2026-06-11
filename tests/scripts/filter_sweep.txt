@@ -1,0 +1,18 @@
+# Sustained note + filter cutoff sweep (CC74) up then down
+render_seconds 6
+0     pc 0
+100   on 60 100
+300   cc 74 10
+500   cc 74 30
+700   cc 74 50
+900   cc 74 70
+1100  cc 74 90
+1300  cc 74 110
+1500  cc 74 127
+1700  cc 74 100
+1900  cc 74 80
+2100  cc 74 60
+2300  cc 74 40
+2500  cc 74 20
+2700  cc 74 0
+3000  off 60
