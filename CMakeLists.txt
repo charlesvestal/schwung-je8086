@@ -54,7 +54,9 @@ target_link_libraries(jp8000-move-plugin PRIVATE
 )
 
 # Statically link libstdc++ - the Move device may have an older GLIBCXX
-target_link_options(jp8000-move-plugin PRIVATE -static-libstdc++ -static-libgcc)
+if(NOT APPLE)
+    target_link_options(jp8000-move-plugin PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 
 # Output as dsp.so
 set_target_properties(jp8000-move-plugin PROPERTIES
@@ -104,6 +106,51 @@ target_include_directories(audio_probe PRIVATE ${GEARMULATOR_SOURCE})
 target_link_libraries(audio_probe PRIVATE jeLib synthLib baseLib)
 if(NOT APPLE)
     target_link_options(audio_probe PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# ---- spike_protocol: H8S→ASIC protocol characterization tool ----
+add_executable(spike_protocol src/tools/spike_protocol.cpp)
+target_include_directories(spike_protocol PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(spike_protocol PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(spike_protocol PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# ---- jp8000_render: scripted MIDI → WAV for A/B testing ----
+add_executable(jp8000_render src/tools/jp8000_render.cpp)
+target_include_directories(jp8000_render PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(jp8000_render PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(jp8000_render PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# ---- nusaw_render: drive schwung-nusaw with the same script format ----
+set(NUSAW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../schwung-nusaw/src/dsp")
+if(EXISTS "${NUSAW_SRC}/nusaw_engine.cpp")
+    add_executable(nusaw_render
+        src/tools/nusaw_render.cpp
+        ${NUSAW_SRC}/nusaw_engine.cpp)
+    target_include_directories(nusaw_render PRIVATE ${NUSAW_SRC})
+    if(NOT APPLE)
+        target_link_options(nusaw_render PRIVATE -static-libstdc++ -static-libgcc)
+    endif()
+else()
+    message(STATUS "schwung-nusaw not found at ${NUSAW_SRC}; skipping nusaw_render")
+endif()
+
+# ---- snap_bisect: isolate snapshot-boot mute (serial mode, raw Je8086) ----
+add_executable(snap_bisect src/tools/snap_bisect.cpp)
+target_include_directories(snap_bisect PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(snap_bisect PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(snap_bisect PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# ---- plugin_host_test: minimal v2 host that dlopens dsp.so for autonomous testing ----
+add_executable(plugin_host_test src/tools/plugin_host_test.cpp)
+target_link_libraries(plugin_host_test PRIVATE dl pthread)
+if(NOT APPLE)
+    target_link_options(plugin_host_test PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
 # ---- jeTestConsole (built from our source) ----

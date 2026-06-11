@@ -1,0 +1,5 @@
+# Sustained C4 quarter-note, 3-second release tail
+render_seconds 5
+0     pc 0
+100   on 60 100
+2000  off 60

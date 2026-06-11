@@ -1,0 +1,13 @@
+# Staccato octaves — tests transient/attack character
+render_seconds 5
+0     pc 0
+100   on 48 100
+250   off 48
+350   on 60 100
+500   off 60
+600   on 72 100
+750   off 72
+850   on 60 100
+1000  off 60
+1100  on 48 100
+1250  off 48
