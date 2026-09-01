@@ -9,7 +9,9 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---- Gearmulator dependencies ----
-set(GEARMULATOR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/libs/gearmulator/source)
+if(NOT GEARMULATOR_SOURCE)
+    set(GEARMULATOR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/libs/gearmulator/source)
+endif()
 
 # DSP56300 emulator (includes asmjit JIT compiler — needed by ESP JIT)
 set(ASMJIT_STATIC TRUE)
