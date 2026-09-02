@@ -1,68 +1,102 @@
-# The JP-8000 front panel, and what our pages get wrong
+# The JP-8000 front panel, and where our pages disagree
 
-Source: `jeJucePlugin/skins/jeTrancy/jeTrancy.rml`. That skin is an editor
-layout modelled on the hardware panel, not a photograph of one — but it is the
-best evidence in the tree, it carries absolute coordinates, and its section
-comments are the panel's own section names. Extracted with the positions below;
-`x` runs left-to-right across the panel.
+Source: the **Roland JP-8000 Owner's Manual, "Front and Rear Panel", pp. 10-11**
+— the numbered panel diagram and its key. The manual is a scanned PDF with no
+text layer, so this was read off the diagrams themselves.
 
-| Section | x | y | What sits in it |
-|---|---|---|---|
-| LFO 1 | 11 | 32 | Waveform, **Sync**, Rate, Fade |
-| OSC 1 | 335 | 52 | Waveform, Control 1, Control 2 |
-| Key Mode / Voice Assign | 549 | 7 | KeyMode, SplitPoint, VoiceAssign, **BendRange up/down** |
-| OSC Common | 524 | 0 | Balance, X-Mod, Osc Shift, LFO1/Env Dest, **all three envelopes**, Mono/Legato/Velocity, Tone, Chorus/Delay |
-| OSC 2 | 811 | 32 | Waveform, Control 1, Control 2, Range, Fine, Sync, Ring Mod |
-| Filter | 1490 | 32 | Type, Slope, Cutoff, Resonance, Key Follow, **LFO1 Depth** |
-| Ensemble / Arp | 1732 | 698 | Arp Switch, Hold, **Tempo**, Beat Pattern, Destination, Range |
-| Amp | 2097 | 46 | Level, Pan, LFO1 Depth, **LFO2 Rate + Pitch/Filter/Amp LFO2 depths**, **Portamento**, Delay Type |
-| Global Bottom Row | 175 | 1148 | MasterVolume, **MasterTune, RemoteControlChannel, MidiSync, RemoteKeyboardChannel** |
+> An earlier version of this file was derived from
+> `jeJucePlugin/skins/jeTrancy/jeTrancy.rml`. **That skin is the JP-8080 rack**,
+> not the keyboard: it carries an Ensemble section, the whole Voice Modulator
+> block, Unison, an Osc 2 external input and `voiceAssignRack` /
+> `RemoteKeyboardChannel`, none of which exist on a JP-8000. Several claims made
+> from it were wrong and are corrected below. The skin renders both models
+> behind `deviceModel` conditionals, which is what made it look authoritative.
 
-**Signal order across the panel is LFO 1 → OSC 1 → OSC COMMON → OSC 2 → FILTER
-→ AMP**, with the arpeggiator lower-centre-right and a global strip along the
-bottom.
+## The panel, by the manual's own numbering
 
-## Where our pages disagree
+Upper-right block, and the transport strip under it:
 
-Each of these is a deliberate future change, not a bug filed against today's
-build. Today's order came from the parameter table; the panel is a better
-source, and reordering is cheap because it is all in `gen_params.py`.
+| # | Section | Controls |
+|---|---|---|
+| 1 | **LFO 1** | Waveform, Rate, Fade |
+| 2 | **OSC COMMON** | Ring, LFO1 & Env Destination, Env Depth, Osc Balance, X-Mod Depth, LFO 1 Depth, pitch-env A / D |
+| 10 | Volume | (host level) |
+| 11 | **ARPEGGIATOR / RPS** | **Tempo**, Mode, Range, On/Off, Arp Hold, Rec |
+| 12 | Motion Control | 1, 2 |
 
-1. **LFO 1 should come first, not eighth.** It is the leftmost panel section.
-   Our page order runs Main, Osc 1, Osc 2, Mix & Mod, Pitch, Filter, Amp,
-   LFO 1 — panel order is LFO 1, Osc 1, Mix & Mod, Osc 2, Filter, Amp.
+Main row, left to right:
 
-2. **Mix & Mod belongs BETWEEN Osc 1 and Osc 2**, because "OSC Common" is
-   physically the strip between them. Ours sits after Osc 2.
+| # | Section | Controls |
+|---|---|---|
+| 3 | **OSC 1** | Waveform, Ctrl 1, Ctrl 2 |
+| 4 | **OSC 2** | Range, Sync, Waveform, Pulse Width, PWM Depth, Fine/Wide |
+| 5 | **FILTER** | Type, Slope, Cutoff, Resonance, Key Follow, LFO 1 Depth, Env Depth, **A D S R** |
+| 6 | **AMP** | LFO 1 Depth, Auto/Manual pan, Level, **A D S R** |
 
-3. **LFO 2 is a modulation strip, not a pair of knobs.** The panel groups
-   `Lfo2Rate` with `PitchLfo2Depth`, `FilterLfo2Depth` and `AmpLfo2Depth` in
-   the Amp area. We scatter those three across Pitch, Filter and Amp and leave
-   LFO 2 as a two-cell page. Collecting them gives a five-control page that
-   matches the hardware and removes our thinnest page.
+Row below it:
 
-4. **Tempo belongs with the arpeggiator.** The panel has it inside the Arp
-   section; we have it on Performance → Setup.
+| # | Section | Controls |
+|---|---|---|
+| 13 | **KEY & PANEL** | Key Mode (Single/Dual/Split), Panel Select (Lower/Upper) |
+| 7 | **TONE CONTROL** | Bass, Treble |
+| 8 | **CHORUS** | Level, Type |
+| 9 | **DELAY** | Time, Feedback, Level |
 
-5. **Bend Range belongs with Key Mode / Split / Voice Assign**, in the top
-   strip. We have bend on Play and the rest on Performance → Setup.
+Left-hand block:
 
-6. **Portamento is an Amp-section control** on the panel; we have it on Play.
+| # | Section | Controls |
+|---|---|---|
+| 20 | **CONTROLLER** | Ribbon Assign, Velocity Assign, **Bend Range** |
+| 21 | **LFO 2** | Rate, **Depth**, Depth Select (Pitch / Filter / Amp) |
+| 22 | **KEYBOARD** | Portamento Time, Velocity, Legato/Mono, Osc Shift, Keyboard Shift |
+| 23-25 | Ribbon controller, bend/mod lever | |
 
-7. **LFO 1 Sync sits with LFO 1.** Ours is per-part (`up_lfo1_sync`,
-   `lo_lfo1_sync`) on the Upper/Lower Part pages, which is where the sysex
-   address puts it — worth showing in both places rather than moving.
+## What this changes for our pages
 
-## The system parameters have a panel home
+Confirmed right as shipped:
 
-The Global Bottom Row is exactly the system area: MasterTune,
-RemoteControlChannel, MidiSync, RemoteKeyboardChannel (and MasterVolume, which
-is the host's). So a **System** page is panel-faithful, not an invention.
+- **Filter and Amp each own an ADSR on the panel**, in their own sections — so
+  the filter envelope belongs on Filter and the amp envelope on Amp, which is
+  where they are.
+- **Tempo belongs with the arpeggiator** (section 11), not on Setup.
+- **Osc 1 and Osc 2 are separate panel sections**, which is what the recent
+  split gives us.
 
-`ui_hierarchy.modes` can carry a third entry — `page_plan.mjs` treats the mode
-names AS level names and the mode selector is itself a pick-list, so a `system`
-level of plain params works as a mode root without a preset browser. The
-plumbing it needs: widen `mode` past 0..1 (`parse_mode` and its clamp),
-teach `bank_view_for` that a mode may have no bank list, and add the system
-parameters to the address table under `AREA_SYSTEM`. Writes there are verified
-— see the arp note; `sysreq`/`sysparam` in `jp8000_render` read and write them.
+To change:
+
+1. **Merge "Mix & Mod" and "Pitch" into one "Osc Common" page.** Section 2 holds
+   Ring, LFO1&Env Destination, Env Depth, Osc Balance, X-Mod Depth, LFO 1 Depth
+   and the pitch-envelope A/D — our two pages are halves of one panel section,
+   and together they are exactly eight cells.
+2. **LFO 2 is Rate + Depth + Depth Select.** The panel has ONE depth knob and a
+   selector for Pitch / Filter / Amp; the sysex splits that into three
+   parameters, which we currently scatter across Pitch, Filter and Amp. Put
+   `lfo2_rate`, `lfo2_depth_select` and the three depths on the LFO 2 page —
+   five controls, and it stops being our thinnest page.
+3. **Tone / Chorus / Delay are three sections, not one.** Our "FX & Tone" page
+   merges all three. It fits eight cells and is defensible, but if it is ever
+   split, split it the way the panel does.
+4. **Osc Shift is a KEYBOARD control** (section 22), not an oscillator one. It
+   is on our Osc 1 page; it belongs on Play.
+5. **Bend Range sits with Ribbon Assign and Velocity Assign** in CONTROLLER, not
+   with Key Mode. Ours is on Play, which is closer than the skin suggested.
+
+Corrections to the JP-8080-derived version of this file: Portamento is a
+KEYBOARD control, not an Amp one; Bend Range is in CONTROLLER, not with Key
+Mode; and there is no Ensemble section at all.
+
+## The system parameters
+
+The JP-8000 has no global knob strip — the manual reaches System settings
+through **SHIFT/EXIT** (section 17: "Press this button to set Performance
+parameters or System parameters, p.85"). So System is a *mode you enter*, which
+maps cleanly onto a third `ui_hierarchy.modes` entry rather than a page hidden
+under Performance.
+
+`page_plan.mjs` supports that: with `modes` present the mode names ARE level
+names and the selector is itself a pick-list, so a `system` level of plain
+params works as a mode root with no preset browser. The plumbing: widen `mode`
+past 0..1 (`parse_mode` and its clamp), teach `bank_view_for` that a mode may
+have no bank list, and add the system parameters to the address table under
+`AREA_SYSTEM`. Writes there are verified — `sysreq` / `sysparam` in
+`jp8000_render` read and write them.
