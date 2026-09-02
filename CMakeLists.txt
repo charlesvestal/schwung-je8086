@@ -126,6 +126,10 @@ if(NOT APPLE)
     target_link_options(jp8000_render PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
+# ---- plugin_drive: load dsp.so through the plugin API and render ----
+add_executable(plugin_drive src/tools/plugin_drive.cpp)
+target_link_libraries(plugin_drive PRIVATE ${CMAKE_DL_LIBS})
+
 # ---- nusaw_render: drive schwung-nusaw with the same script format ----
 set(NUSAW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../schwung-nusaw/src/dsp")
 if(EXISTS "${NUSAW_SRC}/nusaw_engine.cpp")

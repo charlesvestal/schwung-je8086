@@ -84,6 +84,9 @@ typedef struct plugin_api_v2 {
 
 #define JE_INTERNAL_RATE    88200
 #define AUDIO_RING_SIZE     8192   /* int16_t stereo pairs */
+/* Producer sleeps above this (~68 ms at 88.2 kHz) and boots to it: this is
+ * both the stall the pipeline can absorb and the MIDI-to-audio latency. */
+#define AUDIO_RING_THROTTLE 6000
 #define MIDI_FIFO_SIZE      4096
 #define OUTPUT_GAIN         0.5f
 #define JE_BLOCK_SIZE       128
@@ -91,13 +94,30 @@ typedef struct plugin_api_v2 {
 /* GRAM handoff ring (same as je_fork_shm.h but embedded in shm) */
 #define JE_GRAM_RING_CAP    1024
 #define JE_GRAM_RING_MASK   (JE_GRAM_RING_CAP - 1)
-#define JE_GRAM_COUNT       8   /* widest boundary payload; see g_je_handoff_words */
+#define JE_GRAM_COUNT       10  /* widest boundary payload (2->3 + 0xa0/0xa2); see JE_HANDOFF_MAX */
 
-/* Which ASIC starts the child's half. H8S + ASICs [0,split) render in the
- * DSP parent, ASICs [split,4) in the ASIC child. Measured on the Move
- * (dense emitter): split=2 parent 11.96 / child 5.09 us per sample (1.00x);
- * split=1 parent 9.4 / child 9.1 (1.16x, budget 11.34). */
-#define JE_SPLIT_ASIC       1
+/* Pipeline shape. The emulator is an N-stage fork pipeline: stage 0 (the DSP
+ * parent) runs the H8S plus ASICs [0, b1); each child stage s owns the
+ * contiguous ASIC run [b_s, b_{s+1}) and hands its GRAM boundary to the next
+ * stage through a per-stage ring; the last stage writes audio. Every stage
+ * lags the one before it by one sample, and H8S register writes travel
+ * stamped with the parent's sample index so each stage applies them before
+ * rendering the same index (bit-exact with the serial emulator on all
+ * presets tested; see src/benchmark/dsp_bench.cpp).
+ *
+ * Measured on the Move with the dense emitter, budget 11.34 us/sample:
+ *   2-stage {H8S+A0}/{A1..3}:      parent 9.4 / child 9.1   -> child-bound
+ *   3-stage {H8S+A0}/{A1}/{A2,3}:  stage0 ~8.5 / 6.0 / 5.1  -> H8S-bound
+ * so the default is the 3-stage shape and the H8S interpreter sets the ceiling.
+ *
+ * Boundaries can be overridden without a rebuild by writing e.g. "1,2" or "2"
+ * to JE_PIPELINE_FILE (read once at load); cores likewise via a second line
+ * "2,1,0" (stage0, stage1, ...). Core 3 is the SPI core and is never used
+ * by default. */
+#define JE_MAX_STAGES       4
+#define JE_PIPELINE_FILE    "/data/UserData/schwung/jp8000_pipeline"
+static const int JE_DEFAULT_BOUNDS[JE_MAX_STAGES - 1] = {1, 2, 0};
+static const int JE_DEFAULT_CORES[JE_MAX_STAGES]      = {2, 1, 0, 0};
 
 /* ARM memory barriers for cross-process SPSC ring buffers.
  * Without these, ARM's weak memory ordering lets the index update
@@ -141,11 +161,22 @@ static void pin_to_core(int core) {
 #endif
 }
 
+/*
+ * Debug log. Armed by `touch /data/UserData/schwung/jp8000_debug_on`, checked
+ * once per process; off by default. NEVER call from on_midi / render_block /
+ * the stage loops: those run on the SPI callback (host side) or in the audio
+ * hot path (child side), and an fflush to eMMC blocks ~100 ms when writeback
+ * kicks in. A `% 10000` uc-write log in stage 0 was exactly that — a 60-100 ms
+ * all-stage freeze every few seconds that looked like an emulator stall.
+ */
+#define JP8000_DEBUG_ARM_FILE "/data/UserData/schwung/jp8000_debug_on"
 static FILE *g_vlog = nullptr;
+static int g_vlog_armed = -1;
 static void vlog(const char *fmt, ...) {
+    if (g_vlog_armed < 0) g_vlog_armed = access(JP8000_DEBUG_ARM_FILE, F_OK) == 0 ? 1 : 0;
+    if (!g_vlog_armed) return;
     if (!g_vlog) {
         g_vlog = fopen("/data/UserData/jp8000_debug.log", "a");
-        if (!g_vlog) g_vlog = fopen("/tmp/jp8000_debug.log", "a");
         if (!g_vlog) return;
     }
     va_list ap;
@@ -164,34 +195,47 @@ struct je_gram_entry_t {
     int32_t gram[JE_GRAM_COUNT];
 };
 
+/* A forwarded H8S register write. `sample` is the parent's sample index when
+ * the write happened; the write precedes that sample's render, so the owning
+ * stage applies it before rendering the SAME index — never on arrival, which
+ * is up to a gram ring (~11.6 ms) early when the parent runs ahead. Applying
+ * on arrival cost a 9e-3 deviation from the serial emulator; stamped, the
+ * split is bit-exact. */
+#define UC_WRITE_RING_CAP 8192
+struct uc_write_t { uint8_t asic; uint8_t val; uint16_t addr; uint32_t sample; };
+
+/* One pipeline stage. Stage s owns ASICs [lo, hi); its INPUT rings are written
+ * by stage s-1 (gram) and by the parent (uc writes, only for ASICs it owns).
+ * Stage 0 is the DSP parent itself and uses only samples_produced. */
+struct je_stage_t {
+    int lo, hi;
+    volatile int ready;
+    volatile int alive;
+    uc_write_t uc_ring[UC_WRITE_RING_CAP];
+    volatile int uc_write;
+    volatile int uc_read;
+    je_gram_entry_t gram_ring[JE_GRAM_RING_CAP];
+    volatile int gram_write;
+    volatile int gram_read;
+    /* Samples this stage has published to the next stage (or to audio) */
+    volatile int64_t samples_produced;
+};
+
 struct jp8000_shm_t {
-    /* Audio ring: child writes int16_t stereo pairs, parent reads */
+    /* Audio ring: last stage writes int16_t stereo pairs, plugin reads */
     int16_t audio_ring[AUDIO_RING_SIZE * 2];
     volatile int ring_read;
     volatile int ring_write;
 
-    /* GRAM ring: parent writes, child reads */
-    je_gram_entry_t gram_ring[JE_GRAM_RING_CAP];
-    volatile int gram_write;
-    volatile int gram_read;
+    /* Pipeline */
+    int num_stages;
+    int cores[JE_MAX_STAGES];
+    je_stage_t stage[JE_MAX_STAGES];
 
     /* MIDI FIFO: parent writes, child reads */
     uint8_t midi_buf[MIDI_FIFO_SIZE];
     volatile int midi_read;
     volatile int midi_write;
-
-    /* uC write ring: parent forwards writes to child-owned ASICs, child
-     * applies them. `sample` is the parent's sample index when the write
-     * happened; the write precedes that sample's render, so the child applies
-     * it before rendering the SAME index — never on arrival, which is up to a
-     * gram ring (~11.6 ms) early when the parent runs ahead. Applying on
-     * arrival cost a 9e-3 deviation from the serial emulator; stamped, the
-     * split is bit-exact. */
-    #define UC_WRITE_RING_CAP 8192
-    struct uc_write_t { uint8_t asic; uint8_t val; uint16_t addr; uint32_t sample; };
-    uc_write_t uc_write_ring[UC_WRITE_RING_CAP];
-    volatile int uc_write_read;
-    volatile int uc_write_write;
 
     /* Control */
     volatile int child_ready;
@@ -210,10 +254,11 @@ struct jp8000_shm_t {
     /* Profiling */
     volatile int underrun_count;
     volatile int render_count;
-    volatile int64_t child_samples_produced;
-    volatile int64_t parent_samples_produced;
+    volatile int midi_count;      /* on_midi calls, reported in __status */
+    volatile int out_peak;        /* max |sample| of the last rendered block, L/R */
+    volatile int out_min;         /* min signed sample of the last block (a DC pedestal shows here) */
 
-    /* Child-owned ASIC readback registers, child → parent, so the H8S in
+    /* Child-owned ASIC readback registers, stage → parent, so the H8S in
      * the parent reads live values instead of its stale local copies. Async
      * by construction; the firmware never reads ASIC1's and reads ASIC2/3's
      * <0.06 times per sample, and the result is bit-exact with serial. */
@@ -234,8 +279,8 @@ static int audio_ring_free(jp8000_shm_t *shm) {
     return AUDIO_RING_SIZE - 1 - audio_ring_available(shm);
 }
 
-static int gram_ring_available(jp8000_shm_t *shm) {
-    int avail = shm->gram_write - shm->gram_read;
+static int gram_ring_available(const je_stage_t *st) {
+    int avail = st->gram_write - st->gram_read;
     if (avail < 0) avail += JE_GRAM_RING_CAP * 2;
     return avail;
 }
@@ -250,20 +295,61 @@ static int midi_fifo_free(jp8000_shm_t *shm) {
     return MIDI_FIFO_SIZE - 1 - midi_fifo_available(shm);
 }
 
-static int uc_write_ring_available(jp8000_shm_t *shm) {
-    int avail = shm->uc_write_write - shm->uc_write_read;
+static int uc_write_ring_available(const je_stage_t *st) {
+    int avail = st->uc_write - st->uc_read;
     if (avail < 0) avail += UC_WRITE_RING_CAP;
     return avail;
 }
 
-static void uc_write_ring_push(jp8000_shm_t *shm, int asic, uint32_t addr, uint8_t val,
+static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t val,
                                uint32_t sample) {
-    if (uc_write_ring_available(shm) >= UC_WRITE_RING_CAP - 1) return; /* drop if full */
-    int wi = shm->uc_write_write;
-    shm->uc_write_ring[wi] = jp8000_shm_t::uc_write_t{
-        (uint8_t)asic, val, (uint16_t)addr, sample };
+    if (uc_write_ring_available(st) >= UC_WRITE_RING_CAP - 1) return; /* drop if full */
+    int wi = st->uc_write;
+    st->uc_ring[wi] = uc_write_t{ (uint8_t)asic, val, (uint16_t)addr, sample };
     SHM_STORE_FENCE();
-    shm->uc_write_write = (wi + 1) % UC_WRITE_RING_CAP;
+    st->uc_write = (wi + 1) % UC_WRITE_RING_CAP;
+}
+
+/*
+ * Scheduling policy of the DSP processes. The child is forked from whatever
+ * thread called create_instance, and inherits its class: the SPI callback
+ * (FIFO 70) on today's chain host, a FIFO 20 loader once schwung#303 lands,
+ * SCHED_OTHER under plugin_drive run as `ableton`.
+ *
+ * Measured 2026-09-02 on the device at 1.15x with Move running: SCHED_OTHER
+ * stages get preempted by MoveOriginal's main thread (~45-90% of a core) for
+ * ~100 ms windows and underrun 4 runs in 6; at FIFO 20 the ring never leaves
+ * the throttle, 6 runs in 6. FIFO 70 is worse than either: it is above Move's
+ * `Link Main` (35) and starves Link Audio delivery — the "fork" entry in the
+ * 2026-08-22 RT thread audit was this module.
+ *
+ * So: an inherited realtime priority is CLAMPED to JP8000_RT_PRIO, never
+ * raised and never dropped to SCHED_OTHER. MoveOriginal runs as `ableton`
+ * with RLIMIT_RTPRIO 0, so a process that leaves the realtime class cannot
+ * come back; and the stages fork from this process later and inherit
+ * whatever this leaves in place.
+ */
+#define JP8000_RT_PRIO 20
+static void child_clamp_realtime(jp8000_shm_t *shm) {
+    (void)shm;
+#ifdef __linux__
+    const int pol = sched_getscheduler(0);
+    if (pol != SCHED_FIFO && pol != SCHED_RR) {
+        vlog("[child] sched: inherited SCHED_OTHER, leaving it");
+        return;
+    }
+    struct sched_param sp{};
+    sched_getparam(0, &sp);
+    if (sp.sched_priority <= JP8000_RT_PRIO) {
+        vlog("[child] sched: inherited FIFO %d, leaving it", sp.sched_priority);
+        return;
+    }
+    const int inherited = sp.sched_priority;
+    sp.sched_priority = JP8000_RT_PRIO;
+    const int rc = sched_setscheduler(0, SCHED_FIFO, &sp);
+    sched_getparam(0, &sp);  /* verify: sched_setscheduler has failed silently on this device before */
+    vlog("[child] sched: inherited FIFO %d -> FIFO %d (rc=%d, now %d)", inherited, JP8000_RT_PRIO, rc, sp.sched_priority);
+#endif
 }
 
 /* Wait for a cross-process condition: spin briefly (the other side is one
@@ -285,6 +371,62 @@ static bool shm_wait(jp8000_shm_t *shm, Cond cond) {
     return true;
 }
 
+/* Push one GRAM handoff into stage `to`'s input ring, waiting for space. */
+static void gram_ring_push(jp8000_shm_t *shm, je_stage_t *to, const int32_t *gram) {
+    if (!shm_wait(shm, [to]{ return gram_ring_available(to) < JE_GRAM_RING_CAP - 1; }))
+        return;
+    int wi = to->gram_write & JE_GRAM_RING_MASK;
+    for (int k = 0; k < JE_GRAM_COUNT; k++)
+        to->gram_ring[wi].gram[k] = gram[k];
+    SHM_STORE_FENCE();
+    to->gram_write = (to->gram_write + 1) % (JE_GRAM_RING_CAP * 2);
+}
+
+/* Parse a comma list of ints; returns the count. */
+static int parse_int_list(const char *s, int *out, int max) {
+    int n = 0;
+    while (*s && n < max) {
+        while (*s == ' ' || *s == '\t') s++;
+        if (*s < '0' || *s > '9') break;
+        out[n++] = atoi(s);
+        while (*s && *s != ',' && *s != '\n') s++;
+        if (*s == ',') s++;
+        else break;
+    }
+    return n;
+}
+
+/* Pipeline shape: defaults, or JE_PIPELINE_FILE ("b1,b2\ncore0,core1,...").
+ * Fills shm->num_stages, stage[].lo/hi and cores. Bounds must be ascending
+ * in 1..3; anything malformed falls back to the defaults. */
+static void configure_pipeline(jp8000_shm_t *shm) {
+    int bounds[JE_MAX_STAGES - 1]; int nbounds = 0;
+    int cores[JE_MAX_STAGES]; int ncores = 0;
+
+    if (FILE *f = fopen(JE_PIPELINE_FILE, "r")) {
+        char line[128];
+        if (fgets(line, sizeof(line), f)) nbounds = parse_int_list(line, bounds, JE_MAX_STAGES - 1);
+        if (fgets(line, sizeof(line), f)) ncores = parse_int_list(line, cores, JE_MAX_STAGES);
+        fclose(f);
+        for (int i = 0; i < nbounds; i++)
+            if (bounds[i] < 1 || bounds[i] > 3 || (i > 0 && bounds[i] <= bounds[i - 1])) { nbounds = 0; break; }
+        for (int i = 0; i < ncores; i++)
+            if (cores[i] < 0 || cores[i] > 3) { ncores = 0; break; }
+    }
+    if (nbounds == 0) {
+        for (int i = 0; i < JE_MAX_STAGES - 1 && JE_DEFAULT_BOUNDS[i]; i++) bounds[nbounds++] = JE_DEFAULT_BOUNDS[i];
+    }
+    for (int i = 0; i < JE_MAX_STAGES; i++)
+        shm->cores[i] = (i < ncores) ? cores[i] : JE_DEFAULT_CORES[i];
+
+    shm->num_stages = nbounds + 1;
+    shm->stage[0].lo = 0; shm->stage[0].hi = bounds[0];
+    for (int s = 1; s < shm->num_stages; s++) {
+        shm->stage[s].lo = bounds[s - 1];
+        shm->stage[s].hi = (s < nbounds) ? bounds[s] : 4;
+    }
+}
+
 static void midi_fifo_push(jp8000_shm_t *shm, const uint8_t *msg, int len) {
     if (len < 1 || len > 8) return;
     if (midi_fifo_free(shm) < len + 1) return;
@@ -303,11 +445,31 @@ static void midi_fifo_push(jp8000_shm_t *shm, const uint8_t *msg, int len) {
  * Instance structure
  * ===================================================================== */
 
+/* Output DC blocker, one per channel. The ESP's DAC word carries a DC
+ * pedestal (about -85 in the 24-bit word, -4 LSB after the plugin gain on the
+ * left channel, -1 on the right) and the patch's chorus/delay LFOs ride a
+ * +-2 LSB ripple on it. The emulation is faithful; the problem is the host:
+ * the shim only idles a slot whose output stays within +-4 LSB for a second,
+ * so with the pedestal the three stages never sleep and cost ~1.5 cores for
+ * the rest of the session even with nothing playing (measured 2026-09-02:
+ * 48-52% of a core per stage at rest). A one-pole HPF at ~3 Hz removes the
+ * pedestal and is inaudible. */
+struct dc_block_t { float x1, y1; };
+static inline int16_t dc_block(dc_block_t *d, int32_t x) {
+    float y = (float)x - d->x1 + 0.9995f * d->y1;   /* fc ~ 3.5 Hz at 44.1 kHz */
+    if (y < 1e-6f && y > -1e-6f) y = 0.0f;           /* no denormal tail */
+    d->x1 = (float)x; d->y1 = y;
+    int v = (int)lrintf(y);
+    if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+    return (int16_t)v;
+}
+
 struct jp8000_instance_t {
     jp8000_shm_t *shm;
     pid_t child_pid;
     pthread_t boot_thread;
     volatile int boot_thread_running;
+    dc_block_t dc[2];
 };
 
 /* =====================================================================
@@ -357,6 +519,96 @@ static void child_send_test_note(jeLib::Je8086 &je) {
     je.addMidiEvent(noteOn);
 }
 
+/* One forked pipeline stage: ASICs [lo, hi) of stage s, one iteration per
+ * sample index. Consumes the lo-1 -> lo handoff from stage s-1, produces the
+ * hi-1 -> hi handoff to stage s+1 (or audio when it is the last stage). */
+static void stage_main(jp8000_shm_t *shm, int s, jeLib::Je8086 &je) {
+    je_stage_t *st = &shm->stage[s];
+    je_stage_t *prev = &shm->stage[s - 1];
+    je_stage_t *next = (s + 1 < shm->num_stages) ? &shm->stage[s + 1] : nullptr;
+    const int lo = st->lo, hi = st->hi;
+
+    g_vlog = nullptr;
+    pin_to_core(shm->cores[s]);
+    baseLib::setFlushDenormalsToZero();
+    jeLib::devices::g_je_parallel_mode = 2;
+    jeLib::devices::g_je_stage_lo = lo;
+    jeLib::devices::g_je_stage_hi = hi;
+
+    /* GRAM consume. The main loop has already waited for the entry. */
+    jeLib::devices::g_je_gram_consume = [shm, st](int32_t *gram) -> bool {
+        if (!shm_wait(shm, [st]{ return gram_ring_available(st) >= 1; })) return false;
+        SHM_LOAD_FENCE();
+        int ri = st->gram_read & JE_GRAM_RING_MASK;
+        for (int k = 0; k < JE_GRAM_COUNT; k++)
+            gram[k] = st->gram_ring[ri].gram[k];
+        st->gram_read = (st->gram_read + 1) % (JE_GRAM_RING_CAP * 2);
+        return true;
+    };
+
+    if (next) {
+        jeLib::devices::g_je_gram_produce = [shm, st, next](const int32_t *gram) {
+            gram_ring_push(shm, next, gram);
+            st->samples_produced++;
+        };
+    } else {
+        /* Audio output to ring.
+         * asic3 emits 24-bit signed samples in an int32 container
+         * (range ±2^23). The Device/JUCE path does `dsp2sample<float>(s)
+         * * masterVolume` with a default master volume of 12.0:
+         *   int16 = s / 2^23 * 12 * 2^15 = s * 12/256 ≈ (s*3)>>6.
+         * The synth's own output level provides the headroom (the DAC
+         * output never approaches 24-bit full scale), same as on the
+         * JUCE plugin; clamp guards the rest. */
+        je.getAsics().setPostSample([shm, st](int32_t left, int32_t right) {
+            if (audio_ring_free(shm) < 1) return;
+            constexpr int32_t GAIN_NUM = 3;  /* *3 >>6 ≈ JUCE master vol 12.0 */
+            constexpr int32_t SHIFT = 6;
+            int32_t l = (left * GAIN_NUM) >> SHIFT;
+            int32_t r = (right * GAIN_NUM) >> SHIFT;
+            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+            int wr = shm->ring_write;
+            shm->audio_ring[wr * 2 + 0] = (int16_t)l;
+            shm->audio_ring[wr * 2 + 1] = (int16_t)r;
+            SHM_STORE_FENCE();
+            shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
+            st->samples_produced++;
+        });
+    }
+
+    st->ready = 1;
+    vlog("[stage%d] ready on core %d, pid=%d, ASIC%d..%d", s, shm->cores[s], (int)getpid(), lo, hi - 1);
+
+    auto& asics = je.getAsics();
+    uint32_t sample = 0;
+    while (!shm->child_shutdown) {
+        /* Every H8S write that precedes sample N is in our uc ring once the
+         * PARENT has published sample N; the previous stage only publishes N
+         * after seeing that, so its counter implies the parent's. gram N itself
+         * is consumed inside processSampleChild (it feeds N+1). */
+        if (!shm_wait(shm, [st, prev, sample]{
+                return gram_ring_available(st) >= 1 &&
+                       prev->samples_produced > (int64_t)sample; }))
+            break;
+        SHM_LOAD_FENCE();
+        while (uc_write_ring_available(st) > 0) {
+            int ri = st->uc_read;
+            const uc_write_t w = st->uc_ring[ri];
+            if (w.sample > sample) break;
+            st->uc_read = (ri + 1) % UC_WRITE_RING_CAP;
+            asics.applyUcWrite(w.asic, w.addr, w.val);
+        }
+
+        if (!asics.processSampleChild()) break;
+        sample++;
+        for (int a = lo; a < hi; a++)
+            asics.getReadback(a, (uint8_t*)shm->readback[a]);
+        st->alive++;
+    }
+    vlog("[stage%d] shutdown after %lld samples", s, (long long)st->samples_produced);
+}
+
 static void child_main(jp8000_shm_t *shm) {
     g_child_shm = shm;
     signal(SIGSEGV, child_crash_handler);
@@ -365,6 +617,7 @@ static void child_main(jp8000_shm_t *shm) {
     g_vlog = nullptr; /* reopen in child */
 
     vlog("[child] started, pid=%d", (int)getpid());
+    child_clamp_realtime(shm);
 
     /* Don't pin cores during boot — let OS schedule freely.
      * Core pinning happens after boot, before real-time DSP work. */
@@ -452,118 +705,77 @@ static void child_main(jp8000_shm_t *shm) {
              warmup_samples / 88200.0);
     }
 
-    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC child...");
+    snprintf((char*)shm->loading_status, sizeof(shm->loading_status), "Forking ASIC stages...");
 
-    /* Fork ASIC child — mode stays 0 until after fork. The split is set
-     * before the fork so both halves agree on the handoff width. */
-    jeLib::devices::g_je_split_asic = JE_SPLIT_ASIC;
-    pid_t asic_pid = fork();
-    if (asic_pid < 0) {
-        snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                 "ASIC fork failed: %s", strerror(errno));
-        shm->initialized = 1; shm->loading_complete = 1;
-        return;
-    }
+    /* Fork one child per stage — mode stays 0 until after the forks. The
+     * first boundary is set before forking so every process agrees on the
+     * handoff width; each child sets its own [lo,hi). */
+    configure_pipeline(shm);
+    vlog("[child] pipeline: stage0 = H8S + ASIC0..%d (core %d)", shm->stage[0].hi - 1, shm->cores[0]);
+    for (int s = 1; s < shm->num_stages; s++)
+        vlog("[child]           stage%d = ASIC%d..%d (core %d)", s, shm->stage[s].lo, shm->stage[s].hi - 1, shm->cores[s]);
+    jeLib::devices::g_je_split_asic = shm->stage[0].hi;
+    jeLib::devices::g_je_stage_lo = 0;
+    jeLib::devices::g_je_stage_hi = shm->stage[0].hi;
 
-    if (asic_pid == 0) {
-        /* === ASIC CHILD: runs ASIC2+3 === */
-        g_vlog = nullptr;
-        pin_to_core(3);
-        baseLib::setFlushDenormalsToZero();
-
-        /* GRAM consume. The main loop has already waited for the entry. */
-        jeLib::devices::g_je_gram_consume = [shm](int32_t *gram) -> bool {
-            if (!shm_wait(shm, [shm]{ return gram_ring_available(shm) >= 1; })) return false;
-            SHM_LOAD_FENCE();
-            int ri = shm->gram_read & JE_GRAM_RING_MASK;
-            for (int k = 0; k < JE_GRAM_COUNT; k++)
-                gram[k] = shm->gram_ring[ri].gram[k];
-            shm->gram_read = (shm->gram_read + 1) % (JE_GRAM_RING_CAP * 2);
-            return true;
-        };
-
-        /* Audio output to ring.
-         * asic3 emits 24-bit signed samples in an int32 container
-         * (range ±2^23). The Device/JUCE path does `dsp2sample<float>(s)
-         * * masterVolume` with a default master volume of 12.0:
-         *   int16 = s / 2^23 * 12 * 2^15 = s * 12/256 ≈ (s*3)>>6.
-         * The synth's own output level provides the headroom (the DAC
-         * output never approaches 24-bit full scale), same as on the
-         * JUCE plugin; clamp guards the rest. */
-        je->getAsics().setPostSample([shm](int32_t left, int32_t right) {
-            if (audio_ring_free(shm) < 1) return;
-            constexpr int32_t GAIN_NUM = 3;  /* *3 >>6 ≈ JUCE master vol 12.0 */
-            constexpr int32_t SHIFT = 6;
-            int32_t l = (left * GAIN_NUM) >> SHIFT;
-            int32_t r = (right * GAIN_NUM) >> SHIFT;
-            if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-            int wr = shm->ring_write;
-            shm->audio_ring[wr * 2 + 0] = (int16_t)l;
-            shm->audio_ring[wr * 2 + 1] = (int16_t)r;
-            SHM_STORE_FENCE();
-            shm->ring_write = (wr + 1) % AUDIO_RING_SIZE;
-            shm->child_samples_produced++;
-        });
-
-        /* ASICs [split,4) loop, one iteration per sample index. A sample may
-         * be rendered only once the parent has finished the same index, so
-         * every write stamped <= it is already in the ring. */
-        auto& asics = je->getAsics();
-        uint32_t sample = 0;
-        while (!shm->child_shutdown) {
-            if (!shm_wait(shm, [shm, sample]{
-                    return gram_ring_available(shm) >= 1 &&
-                           shm->parent_samples_produced > (int64_t)sample; }))
-                break;
-            SHM_LOAD_FENCE();
-            while (uc_write_ring_available(shm) > 0) {
-                int ri = shm->uc_write_read;
-                const auto& w = shm->uc_write_ring[ri];
-                if (w.sample > sample) break;
-                asics.applyUcWrite(w.asic, w.addr, w.val);
-                shm->uc_write_read = (ri + 1) % UC_WRITE_RING_CAP;
-            }
-
-            if (!asics.processSampleChild()) break;
-
-            for (int a = JE_SPLIT_ASIC; a < 4; a++)
-                asics.getReadback(a, (uint8_t*)shm->readback[a]);
-            sample++;
+    pid_t stage_pid[JE_MAX_STAGES] = {0};
+    for (int s = 1; s < shm->num_stages; s++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            snprintf((char*)shm->load_error, sizeof(shm->load_error),
+                     "ASIC fork failed: %s", strerror(errno));
+            shm->initialized = 1; shm->loading_complete = 1;
+            shm->child_shutdown = 1;
+            return;
         }
-        _exit(0);
+        if (pid == 0) {
+            stage_main(shm, s, *je);
+            _exit(0);
+        }
+        stage_pid[s] = pid;
     }
 
-    /* === PARENT DSP: H8S + ASICs [0,split) === */
-    vlog("[child] ASIC fork done, asic_pid=%d", (int)asic_pid);
-    pin_to_core(2);
+    /* === STAGE 0 (this process): H8S + ASICs [0, b1) === */
+    for (int s = 1; s < shm->num_stages; s++) vlog("[child] stage%d pid=%d", s, (int)stage_pid[s]);
+    pin_to_core(shm->cores[0]);
 
-    usleep(50000);
+    /* Wait for every stage to be up */
+    for (int s = 1; s < shm->num_stages; s++) {
+        for (int i = 0; i < 100 && !shm->stage[s].ready; i++) usleep(10000);
+        if (!shm->stage[s].ready)
+            vlog("[child] WARNING: stage%d not ready after 1s", s);
+    }
 
     jeLib::devices::g_je_parallel_mode = 1;
-    jeLib::devices::g_je_gram_produce = [shm](const int32_t *gram) {
-        if (!shm_wait(shm, [shm]{ return gram_ring_available(shm) < JE_GRAM_RING_CAP - 1; }))
-            return;
-        int wi = shm->gram_write & JE_GRAM_RING_MASK;
-        for (int k = 0; k < JE_GRAM_COUNT; k++)
-            shm->gram_ring[wi].gram[k] = gram[k];
-        SHM_STORE_FENCE();
-        shm->gram_write = (shm->gram_write + 1) % (JE_GRAM_RING_CAP * 2);
-        shm->parent_samples_produced++;
-    };
+    /* H8S writes to an ASIC we do not own go to the ring of the stage that
+     * does, stamped with our sample index. */
     static int uc_write_count = 0;
     jeLib::devices::g_je_uc_write_forward = [shm](int asic, uint32_t addr, uint8_t val) {
-        uc_write_ring_push(shm, asic, addr, val, (uint32_t)shm->parent_samples_produced);
+        for (int s = 1; s < shm->num_stages; s++) {
+            je_stage_t *st = &shm->stage[s];
+            if (asic >= st->lo && asic < st->hi) {
+                uc_write_ring_push(st, asic, addr, val, (uint32_t)shm->stage[0].samples_produced);
+                break;
+            }
+        }
+        /* Hot path (stage 0's sample loop): no logging here, see vlog(). */
         uc_write_count++;
-        if (uc_write_count <= 20 || uc_write_count % 10000 == 0)
-            vlog("[uc-fwd] #%d asic=%d addr=0x%04x val=0x%02x", uc_write_count, asic, addr, val);
     };
-    vlog("[child] parallel mode 1 active");
+    /* GRAM produce: the b1-1 -> b1 handoff into stage 1 */
+    jeLib::devices::g_je_gram_produce = [shm](const int32_t *gram) {
+        gram_ring_push(shm, &shm->stage[1], gram);
+        shm->stage[0].samples_produced++;
+    };
+    vlog("[child] parallel mode 1 active, %d stages", shm->num_stages);
 
-    /* Pre-fill */
+    const int split = shm->stage[0].hi;
+
+    /* Pre-fill to the throttle level. The host starts rendering the moment
+     * it sees "ready", so a ring declared ready at 512 samples (6 ms) was
+     * being consumed while it filled, and underran on the first blocks. */
     int prefill = 0;
-    while (audio_ring_available(shm) < 512 && prefill < 5000000) {
-        for (int a = JE_SPLIT_ASIC; a < 4; a++)
+    while (audio_ring_available(shm) < AUDIO_RING_THROTTLE && prefill < 5000000) {
+        for (int a = split; a < 4; a++)
             je->getAsics().setReadback(a, (const uint8_t*)shm->readback[a]);
         je->step();
         if (!je->getSampleBuffer().empty()) je->clearSampleBuffer();
@@ -579,14 +791,14 @@ static void child_main(jp8000_shm_t *shm) {
 
     /* Main DSP loop */
     while (!shm->child_shutdown) {
-        if (audio_ring_available(shm) >= 6000) {
+        if (audio_ring_available(shm) >= AUDIO_RING_THROTTLE) {
             usleep(1000);
             continue;
         }
 
         child_process_midi(shm, *je);
 
-        for (int a = JE_SPLIT_ASIC; a < 4; a++)
+        for (int a = split; a < 4; a++)
             je->getAsics().setReadback(a, (const uint8_t*)shm->readback[a]);
 
         je->step();
@@ -594,14 +806,15 @@ static void child_main(jp8000_shm_t *shm) {
         shm->child_alive++;
     }
 
-    kill(asic_pid, SIGTERM);
-    for (int i = 0; i < 30; i++) {
-        int status;
-        if (waitpid(asic_pid, &status, WNOHANG) == asic_pid) break;
-        usleep(100000);
+    for (int s = 1; s < shm->num_stages; s++) kill(stage_pid[s], SIGTERM);
+    for (int s = 1; s < shm->num_stages; s++) {
+        for (int i = 0; i < 30; i++) {
+            int status;
+            if (waitpid(stage_pid[s], &status, WNOHANG) == stage_pid[s]) { stage_pid[s] = 0; break; }
+            usleep(100000);
+        }
+        if (stage_pid[s]) { kill(stage_pid[s], SIGKILL); waitpid(stage_pid[s], nullptr, 0); }
     }
-    kill(asic_pid, SIGKILL);
-    waitpid(asic_pid, nullptr, 0);
 
     vlog("[child] exiting");
 }
@@ -730,14 +943,13 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     if (!inst || !inst->shm || !inst->shm->initialized || len < 1) return;
     (void)source;
 
-    vlog("[midi] status=0x%02X d1=%d d2=%d len=%d",
-         msg[0], len > 1 ? msg[1] : 0, len > 2 ? msg[2] : 0, len);
-
+    /* SPI callback: no logging here, see vlog(). */
     uint8_t modified[8];
     int n = len > 8 ? 8 : len;
     memcpy(modified, msg, n);
 
     midi_fifo_push(inst->shm, modified, n);
+    inst->shm->midi_count++;
 }
 
 static void v2_set_param(void *instance, const char *key, const char *val) {
@@ -765,10 +977,18 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             return snprintf(buf, buf_len,
                 "{\"status\":\"loading\",\"message\":\"%s\"}", shm->loading_status);
         }
-        return snprintf(buf, buf_len,
+        /* Per-stage sample counters, so a stall can be pinned on the stage
+         * that stopped rather than read off the ring alone. */
+        int n = snprintf(buf, buf_len,
             "{\"status\":\"ready\",\"message\":\"JP-8000 Ready\","
-            "\"ring\":%d,\"underruns\":%d}",
-            audio_ring_available(shm), shm->underrun_count);
+            "\"ring\":%d,\"underruns\":%d,\"midi\":%d,\"peak\":%d,\"min\":%d,\"produced\":[",
+            audio_ring_available(shm), shm->underrun_count, shm->midi_count,
+            shm->out_peak, shm->out_min);
+        for (int s = 0; s < shm->num_stages && n < buf_len; s++)
+            n += snprintf(buf + n, buf_len - n, "%s%lld", s ? "," : "",
+                          (long long)shm->stage[s].samples_produced);
+        if (n < buf_len) n += snprintf(buf + n, buf_len - n, "]}");
+        return n;
     }
 
     return snprintf(buf, buf_len, "0");
@@ -791,20 +1011,8 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
 
     jp8000_shm_t *shm = inst->shm;
 
-    /* Log first 5 calls then every ~10 seconds */
-    if (shm->render_count < 5 || shm->render_count % 3450 == 0) {
-        /* Sample a few values from the ring to check for non-zero audio */
-        int peek_avail = audio_ring_available(shm);
-        int16_t peek_l = 0, peek_r = 0;
-        if (peek_avail > 0) {
-            int ri = shm->ring_read;
-            peek_l = shm->audio_ring[ri * 2 + 0];
-            peek_r = shm->audio_ring[ri * 2 + 1];
-        }
-        vlog("[render] #%d frames=%d ring=%d ur=%d alive=%d prod=%lld peek=%d/%d",
-             shm->render_count, frames, audio_ring_available(shm), shm->underrun_count,
-             shm->child_alive, (long long)shm->child_samples_produced, peek_l, peek_r);
-    }
+    /* SPI callback: no logging here, see vlog(). Ring / underrun / per-stage
+     * counters are exposed through the __status param instead. */
 
     /* The audio ring contains samples at 88200 Hz.
      * Output is 44100 Hz. Decimate 2:1 with simple averaging. */
@@ -817,6 +1025,7 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
 
     int rd = shm->ring_read;
     int out_idx = 0;
+    int peak = 0, mn = 0;
     for (int i = 0; i < to_read; i += 2) {
         if (out_idx >= frames) break;
         /* Average two consecutive samples for 2:1 decimation */
@@ -826,11 +1035,24 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
         l += (int32_t)shm->audio_ring[rd * 2 + 0];
         r += (int32_t)shm->audio_ring[rd * 2 + 1];
         rd = (rd + 1) % AUDIO_RING_SIZE;
-        out[out_idx * 2 + 0] = (int16_t)(l / 2);
-        out[out_idx * 2 + 1] = (int16_t)(r / 2);
+        l = dc_block(&inst->dc[0], l / 2);
+        r = dc_block(&inst->dc[1], r / 2);
+        out[out_idx * 2 + 0] = (int16_t)l;
+        out[out_idx * 2 + 1] = (int16_t)r;
+        /* Block peak / min for __status: the shim only idles a slot whose
+         * output stays within +-4 LSB, and the ESP's DAC word carries a small
+         * DC pedestal, so "is this slot ever silent" is a question worth
+         * being able to answer from the device. */
+        int al = l < 0 ? -l : l, ar = r < 0 ? -r : r;
+        if (al > peak) peak = al;
+        if (ar > peak) peak = ar;
+        if (l < mn) mn = l;
+        if (r < mn) mn = r;
         out_idx++;
     }
     shm->ring_read = rd;
+    shm->out_peak = peak;
+    shm->out_min = mn;
 
     if (out_idx < frames) {
         shm->underrun_count++;
