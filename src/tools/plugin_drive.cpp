@@ -110,6 +110,13 @@ int main(int argc, char **argv) {
     FILE *out = fopen(out_path, "wb");
     if (!out) { perror(out_path); return 1; }
 
+    const int drive_ch = getenv("JE_DRIVE_CH") ? atoi(getenv("JE_DRIVE_CH")) : -1;
+    /* JE_DRIVE_NOTES trims the 8-note chord. One or two notes make an
+     * arpeggiator unmistakable in the envelope; eight are a wash. */
+    int drive_notes = getenv("JE_DRIVE_NOTES") ? atoi(getenv("JE_DRIVE_NOTES")) : 8;
+    if (drive_notes < 1 || drive_notes > 8) drive_notes = 8;
+    if (drive_ch >= 0) fprintf(stderr, "[drive] pinning MIDI channel %d\n", drive_ch + 1);
+
     /* Same phrase as the bench's JE_PHRASE=chord: bank 81/0 program select,
      * eight-note chord staggered in, held 6 s, released, 4 s tail. */
     static const int chord[8] = {48, 52, 55, 59, 62, 66, 69, 72};
@@ -155,9 +162,15 @@ int main(int argc, char **argv) {
         }
         /* A performance has two parts on their own channels (Upper 1,
          * Lower 2 at the factory settings); the chord goes to both so a
-         * layer/split renders every voice it can — the load we are after. */
-        for (int ch = 0; ch < (perf ? 2 : 1); ch++)
-        for (int n = 0; n < 8; n++) {
+         * layer/split renders every voice it can — the load we are after.
+         *
+         * JE_DRIVE_CH pins a single 0-based channel instead. Set it to 2 to
+         * play on MIDI channel 3, the RemoteControlChannel — the only note path
+         * that feeds the arpeggiator. */
+        const int fixed_ch = drive_ch;
+        for (int ch = (fixed_ch >= 0 ? fixed_ch : 0);
+             ch < (fixed_ch >= 0 ? fixed_ch + 1 : (perf ? 2 : 1)); ch++)
+        for (int n = 0; n < drive_notes; n++) {
             uint8_t m[3];
             if (wb == per_sec / 4 + n * 6) { m[0] = 0x90 | ch; m[1] = chord[n]; m[2] = 100; api->on_midi(inst, m, 3, 0); }
             if (wb == 6 * per_sec)         { m[0] = 0x80 | ch; m[1] = chord[n]; m[2] = 0;   api->on_midi(inst, m, 3, 0); }

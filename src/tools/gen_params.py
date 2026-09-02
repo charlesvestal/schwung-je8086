@@ -197,7 +197,11 @@ for area, pre, label in ((AREA_PART_UP, "up_", "Upper "), (AREA_PART_LO, "lo_", 
         p = next(x for x in DESC if x.get("page") == 2 and x["index"] == idx)
         add(p, area, pre + key, label + name, short, idx, False)
 
+# 0x12 PanelSelect is the hardware's UPPER/LOWER/UPPER&LOWER button. It is
+# addressable so "Edit Part" can write it, but it is kept OUT of chain_params
+# (see CP_SKIP): one switch must not have two rows that can disagree.
 COMMON = [(0x10, "key_mode", "Key Mode", "Mode"), (0x11, "split_point", "Split Point", "Split"),
+          (0x12, "panel_select", "Panel Select", "Panel"),
           (0x13, "part_detune", "Part Detune", "Detune"), (0x14, "output_assign", "Output", "Out"),
           (0x15, "arp_dest", "Arp Dest", "Dest"), (0x16, "voice_assign", "Voice Assign", "Voices"),
           (0x17, "arp_switch", "Arpeggio", "Arp"), (0x18, "arp_mode", "Arp Mode", "Mode"),
@@ -211,34 +215,162 @@ for idx, key, name, short in COMMON:
     d = add(p, AREA_COMMON, key, name, short, idx, bit14)
     if key == "trigger_ch": d.update(type="int", min=1, max=16, off=-1)
     if key == "tempo": d.update(type="int", min=20, max=250, off=0)
-    if key == "trigger_note": d.update(type="int", min=0, max=127, off=0)
+    # Ranges below are what the FIRMWARE accepts, probed on the device by
+    # writing a value and reading the area back. The JSON descriptions are the
+    # JP-8080's in places and cannot be trusted for the keyboard:
+    #   arp_beat     89 lands, 90 and 96 are rejected -> 90 options, not 97
+    #   trigger_note 128 lands and MEANS "ALL"; Chariots actually uses it
+    #   voice_assign 5 and 6 are rejected -> our 5 options are right, and the
+    #                JSON's 7 (8-2, 7-3, ...) sum to 10 voices = the rack
+    if key == "trigger_note": d.update(type="int", min=0, max=128, off=0)
+    if key == "arp_beat":
+        d["options"] = d["options"][:90]
+        d.update(min=0, max=len(d["options"]) - 1)
 
 assert len(params) < 230, len(params)
 byKey = {p["key"]: p for p in params}
 assert len(byKey) == len(params), "duplicate keys"
+
+# "part" (Edit Part) is a real control but not a sysex parameter -- it writes
+# PanelSelect through the plugin, so it has no row in the address table. Give it
+# a descriptor here so it can be placed on a page like any other cell. It is NOT
+# appended to `params`, so it stays out of chain_params (which declares it
+# explicitly above) and out of the page-coverage assertion.
+byKey["part"] = dict(key="part", name="Edit Part", short="Part", area=None, lin=None,
+                     bit14=False, default=0, type="enum",
+                     options=["Upper", "Lower", "Both"], min=0, max=2, off=0)
+
+# ---- short names for the Ribbon / Velocity families -------------------------
+# 79 of these had none, and the grid labels a cell with `name` when short_name
+# is absent -- names here run to 20 characters against a ~6-character cell, so
+# every one of them clipped. Derived rather than hand-written, and asserted
+# UNIQUE per page below: two cells reading the same thing is the same defect as
+# two bank rows reading the same thing.
+CTL_SECT = [("Filter", "F"), ("Amp", "A"), ("Pitch", "P"), ("Osc1", "O1"), ("Osc2", "O2"),
+            ("LFO1", "L1"), ("LFO2", "L2"), ("Tone", "T"), ("Delay", "D"),
+            ("Multi-FX", "FX"), ("Cross", "X")]
+CTL_LEAF = [("Control 1", "C1"), ("Control 2", "C2"), ("Control1", "C1"), ("Control2", "C2"),
+            ("LFO1 Depth", "L1"), ("LFO2 Depth", "L2"),
+            ("Env Sustain", "Sus"), ("Env Release", "Rel"), ("Env Attack", "Atk"),
+            ("Env Decay", "Dcy"), ("Env Depth", "Env"), ("Key Follow", "KFol"),
+            ("Ctrl Bass", "Bass"), ("Ctrl Treble", "Treb"), ("Sustain", "Sus"),
+            ("Release", "Rel"), ("Attack", "Atk"), ("Decay", "Dcy"), ("Depth", "Dep"),
+            ("Level", "Lvl"), ("Balance", "Bal"), ("Resonance", "Res"), ("Cutoff", "Cut"),
+            ("Feedback", "Fdbk"), ("Portamento", "Port"), ("Range", "Rng"),
+            ("Fine Wide", "Fine"), ("Rate", "Rat"), ("Fade", "Fade"), ("Time", "Tim"),
+            ("Mod Depth", "Dep")]
+
+def derive_short(name):
+    n = re.sub(r"^(?:[CV]\.|Ctrl |Vel )", "", name).strip()
+    sect = ""
+    for k, v in CTL_SECT:
+        if n.startswith(k + " ") or n == k:
+            sect = v; n = n[len(k):].strip(); break
+    leaf = None
+    for pat, ab in CTL_LEAF:
+        if pat in n: leaf = ab; break
+    if leaf is None: leaf = n.replace(" ", "")[:4] or "x"
+    return ((sect + "." + leaf) if sect else leaf)[:6]
+
+for _p in params:
+    if not _p["short"] and _p["key"].startswith(("ctl_", "vel_")):
+        _p["short"] = derive_short(_p["name"])
+for _fam in ("ctl_", "vel_"):
+    _v = [_p["short"] for _p in params if _p["key"].startswith(_fam)]
+    assert len(_v) == len(set(_v)), "duplicate short_name on the %s page: %s" % (
+        _fam, sorted({x for x in _v if _v.count(x) > 1}))
 
 # ---- hierarchy --------------------------------------------------------------
 def K(*keys):
     for k in keys: assert k in byKey, k
     return list(keys)
 
+
+# ---- Ribbon / Velocity page order -------------------------------------------
+# These 40-parameter families were emitted in the source JSON's order, which put
+# the FILTER envelope across pages 3 and 4 and the AMP envelope across 4 and 5 --
+# a four-stage envelope you cannot see at once. Grouped by section instead, with
+# each ADSR quartet whole inside one row of four.
+#
+# Deliberately NO viz graphics here, unlike the Filter and Amp pages: every one
+# of these is a MODULATION DEPTH, not a value. A filter curve drawn from "how
+# much the ribbon moves the cutoff" would show a response the synth never has.
+MOD_PAGES = [
+    ["osc1_control1", "osc1_control2", "osc2_control1", "osc2_control2",
+     "osc2_range", "osc2_fine_wide", "oscillator_balance", "cross_modulation_depth"],
+    ["lfo1_rate", "lfo1_fade", "lfo2_rate", "pitch_lfo1_depth",
+     "pitch_lfo2_depth", "pitch_envelope_depth", "pitch_envelope_attack_time",
+     "pitch_envelope_decay_time"],
+    ["cutoff_frequency", "resonance", "cutoff_freq_key_follow", "filter_env_depth",
+     "filter_env_attack_time", "filter_env_decay_time", "@filter_sustain",
+     "filter_env_release_time"],
+    ["filter_lfo1_depth", "filter_lfo2_depth", "amp_lfo1_depth", "amp_lfo2_depth",
+     "amp_env_attack_time", "amp_env_decay_time", "amp_env_sustain_level",
+     "amp_env_release_time"],
+    ["amp_level", "tone_control_bass", "tone_control_treble", "multi_effects_level",
+     "delay_time", "delay_feedback", "delay_level", "portamento_time"],
+]
+
+def mod_order(pre):
+    """Resolve the page plan to real keys for one family, and prove it is total.
+
+    The two families are not named identically -- ctl_ has
+    filter_env_sustain_level where vel_ has filter_env_sus_level -- so the
+    sustain slot is resolved by search and the result asserted complete. A
+    silent drop here would lose a parameter off the end of the UI."""
+    have = [x["key"] for x in params if x["key"].startswith(pre)]
+    out = []
+    for page in MOD_PAGES:
+        for slot in page:
+            if slot == "@filter_sustain":
+                cand = [k for k in have if k.startswith(pre + "filter_env_sus")]
+                assert len(cand) == 1, (pre, cand)
+                out.append(cand[0])
+            else:
+                k = pre + slot
+                assert k in have, "unknown key %s" % k
+                out.append(k)
+    assert sorted(out) == sorted(have), (
+        "%s page plan is not total: missing=%s extra=%s"
+        % (pre, sorted(set(have) - set(out)), sorted(set(out) - set(have))))
+    return out
+
 PATCH_LEVELS = [
-    ("osc", "Oscillators", K("osc1_waveform", "osc1_ctrl1", "osc1_ctrl2", "osc_balance", "osc2_waveform",
-                             "osc2_range", "osc2_fine", "osc2_ctrl1", "osc2_ctrl2", "osc2_sync",
-                             "cross_mod_depth", "ring_mod", "osc_shift")),
-    ("pitch", "Pitch", K("lfo1_env_dest", "osc_lfo1_depth", "pitch_lfo2_depth", "pitch_env_depth",
-                         "pitch_env_attack", "pitch_env_decay")),
+    # One "Oscillators" level of 13 put osc2_ctrl1 as the last cell of page 1 and
+    # osc2_ctrl2 as the first of page 2 -- Osc 2's own pair split across a page,
+    # the same defect the envelopes had across a row. Three levels instead, one
+    # per panel section, and WAVE / CTRL1 / CTRL2 sit in the SAME three
+    # positions on both oscillator pages, so the two read alike and the labels
+    # need no O1./O2. prefix to stay unambiguous.
+    ("osc1", "Osc 1", K("osc1_waveform", "osc1_ctrl1", "osc1_ctrl2", "osc_shift")),
+    ("osc2", "Osc 2", K("osc2_waveform", "osc2_ctrl1", "osc2_ctrl2", "osc2_range",
+                        "osc2_fine", "osc2_sync")),
+    ("oscmix", "Mix & Mod", K("osc_balance", "cross_mod_depth", "ring_mod")),
+    # Env depth/attack/decay lead so the pitch-envelope pair stays inside row 1;
+    # with lfo1_env_dest gone to the LFO page it had slid onto cells 3-4.
+    ("pitch", "Pitch", K("pitch_env_depth", "pitch_env_attack", "pitch_env_decay",
+                         "osc_lfo1_depth", "pitch_lfo2_depth")),
     ("filter", "Filter", K("cutoff", "resonance", "filter_env_depth", "key_follow", "filter_attack",
                            "filter_decay", "filter_sustain", "filter_release", "filter_type", "cutoff_slope",
                            "filter_lfo1_depth", "filter_lfo2_depth")),
-    ("amp", "Amp", K("amp_level", "amp_attack", "amp_decay", "amp_sustain", "amp_release", "amp_lfo1_depth",
-                     "amp_lfo1_mode", "amp_lfo2_depth", "tone_bass", "tone_treble")),
-    ("lfo", "LFO", K("lfo1_waveform", "lfo1_rate", "lfo1_fade", "lfo2_rate", "lfo2_depth_select")),
-    ("fx", "Effects", K("chorus_type", "chorus_level", "delay_type", "delay_time", "delay_feedback", "delay_level")),
+    # Bass/Treble are the panel's TONE section, not Amp. Tacked on the end here
+    # they made Amp ten cells -- one page of eight plus a two-cell orphan. Moved
+    # to the output page below, both pages land on exactly eight.
+    ("amp", "Amp", K("amp_attack", "amp_decay", "amp_sustain", "amp_release", "amp_level", "amp_lfo1_depth",
+                     "amp_lfo1_mode", "amp_lfo2_depth")),
+    # Split for the same reason as the oscillators: one "LFO" page put LFO1 and
+    # LFO2 side by side, so both rate knobs had to be relabelled L1.RAT/L2.RAT
+    # to stay apart. On their own pages each is simply RATE, in the same slot.
+    # lfo1_env_dest comes here from Pitch -- DESTINATION is an LFO-section
+    # control on the panel, not a pitch one.
+    ("lfo1", "LFO 1", K("lfo1_waveform", "lfo1_rate", "lfo1_fade", "lfo1_env_dest")),
+    ("lfo2", "LFO 2", K("lfo2_rate", "lfo2_depth_select")),
+    ("fx", "FX & Tone", K("chorus_type", "chorus_level", "delay_type", "delay_time", "delay_feedback",
+                          "delay_level", "tone_bass", "tone_treble")),
     ("play", "Play", K("portamento", "portamento_time", "mono", "legato", "bend_up", "bend_down",
                        "velocity_switch", "morph_bend", "active_bender", "active_velocity", "active_control")),
-    ("ribbon", "Ribbon Ctrl", [p["key"] for p in params if p["key"].startswith("ctl_")]),
-    ("velocity", "Velocity", [p["key"] for p in params if p["key"].startswith("vel_")]),
+    ("ribbon", "Ribbon Ctrl", mod_order("ctl_")),
+    ("velocity", "Velocity", mod_order("vel_")),
 ]
 PERF_LEVELS = [
     ("perf_setup", "Setup", K("key_mode", "split_point", "part_detune", "voice_assign", "output_assign", "tempo")),
@@ -248,40 +380,104 @@ PERF_LEVELS = [
     ("perf_trigger", "Ind. Trigger", K("trigger_switch", "trigger_dest", "trigger_ch", "trigger_note")),
 ]
 covered = set(k for _, _, ks in PATCH_LEVELS + PERF_LEVELS for k in ks)
-missing = [p["key"] for p in params if p["key"] not in covered]
+# panel_select has no page of its own on purpose: "Edit Part" writes it, and a
+# second row for the same switch could disagree with the first.
+UNPAGED = {"panel_select"}
+missing = [p["key"] for p in params if p["key"] not in covered and p["key"] not in UNPAGED]
 assert not missing, missing
 
-MAIN_KNOBS = K("cutoff", "resonance", "filter_env_depth", "amp_attack", "amp_decay", "amp_sustain",
-               "amp_release", "delay_level")
+# A viz graphic must sit inside ONE ROW of four. The amp envelope used to run
+# cells 3-6 here -- straddling the boundary -- so it degraded to four separate
+# bars and drew no curve at all. delay_level moves up; the ADSR owns row 2.
+# Edit Part takes the fourth slot, and delay_level gives it up: delay_level now
+# has a home on FX & Tone, while Edit Part had none and was pushed onto a page
+# of its own -- a whole screen holding one control. Patch is exactly eight cells
+# now, so nothing paginates. Filter keeps cells 0-1 and the amp envelope row 2.
+MAIN_KNOBS = K("cutoff", "resonance", "filter_env_depth", "part",
+               "amp_attack", "amp_decay", "amp_sustain", "amp_release")
 
-def level(label, keys, extra=None, knobs=None):
-    items = [{"key": k, "label": byKey[k]["name"], **({"short_name": byKey[k]["short"]} if byKey[k]["short"] else {})}
+# Two cells on one page reading the same word is not an abbreviation, it is a
+# broken page -- and it is invisible in the contract, only in the pixels. These
+# were found by rendering all 23 grid pages and diffing the labels.
+#
+# The override is PER LEVEL because short_name is otherwise global and the right
+# answer differs by page: "delay_level" must stay "Level" on Main, where it is
+# the only level, and become "DlLvl" on FX, where chorus_level sits beside it.
+# levelShortNames() (page_plan.mjs) gives a level entry precedence over the
+# chain_params one, which is exactly this case.
+LEVEL_SHORT = {
+    "perf_main": {"key_mode": "KeyMd", "arp_mode": "ArpMd"},
+    "fx": {"chorus_type": "ChTyp", "delay_type": "DlTyp",
+           "chorus_level": "ChLvl", "delay_level": "DlLvl"},
+    "play": {"velocity_switch": "VelSw", "active_velocity": "VelAc"},
+}
+
+def level(label, keys, extra=None, knobs=None, lid=None):
+    ov = LEVEL_SHORT.get(lid or "", {})
+    items = [{"key": k, "label": byKey[k]["name"],
+              **({"short_name": ov.get(k) or byKey[k]["short"]} if (ov.get(k) or byKey[k]["short"]) else {})}
              for k in keys]
     if extra: items += extra
     d = {"label": label, "params": items}
     d["knobs"] = knobs if knobs is not None else keys[:8]
     return d
 
+# The preset browser is a HIERARCHY: folder -> bank -> preset. A real library is
+# nested (one collection here is 97 files across 30 folders) and a flat list of
+# 36 truncated paths is unreadable on 128 pixels. bank_folder/bank_in_folder are
+# served by the plugin and are mode-aware.
+BROWSE = dict(patch=("patch_banks", "patch_list", "patch", "Patch"),
+              performance=("perf_banks", "perf_list", "performance", "Performance"))
 levels = {
-    "patch": {"list_param": "patch", "count_param": "patch_count", "name_param": "patch_name",
-              "children": "patch_main", "knobs": MAIN_KNOBS, "params": []},
-    "patch_main": level("Patch", MAIN_KNOBS,
-                        extra=[{"key": "part", "label": "Edit Part"}, {"key": "bank", "label": "Bank"}] +
-                              [{"level": lid, "label": lab} for lid, lab, _ in PATCH_LEVELS]),
-    "performance": {"list_param": "performance", "count_param": "performance_count",
-                    "name_param": "performance_name", "children": "perf_main", "knobs": MAIN_KNOBS, "params": []},
-    "perf_main": level("Performance", [], knobs=K("key_mode", "split_point", "part_detune", "voice_assign",
+    "patch": {"label": "Banks", "list_param": "bank_folder", "count_param": "bank_folder_count",
+              "name_param": "bank_folder_name", "children": "patch_banks", "knobs": MAIN_KNOBS, "params": []},
+    "patch_banks": {"label": "Bank", "list_param": "bank_in_folder", "count_param": "bank_in_folder_count",
+                    "name_param": "bank_in_folder_name", "children": "patch_list", "knobs": MAIN_KNOBS, "params": []},
+    "patch_list": {"label": "Patch", "list_param": "patch", "count_param": "patch_count",
+                   "name_param": "patch_name", "children": "patch_main", "knobs": MAIN_KNOBS, "params": []},
+    # No {"key": "bank"} row: the hierarchy above IS the bank chooser, and the
+    # flat enum lists every bank from every folder with only the basename, so
+    # two files with the same name in different folders read identically.
+    "patch_main": level("Patch", MAIN_KNOBS, lid="patch_main",
+                        extra=[{"level": lid, "label": lab} for lid, lab, _ in PATCH_LEVELS]),
+    "performance": {"label": "Banks", "list_param": "bank_folder", "count_param": "bank_folder_count",
+                    "name_param": "bank_folder_name", "children": "perf_banks", "knobs": MAIN_KNOBS, "params": []},
+    "perf_banks": {"label": "Bank", "list_param": "bank_in_folder", "count_param": "bank_in_folder_count",
+                   "name_param": "bank_in_folder_name", "children": "perf_list", "knobs": MAIN_KNOBS, "params": []},
+    "perf_list": {"label": "Performance", "list_param": "performance", "count_param": "performance_count",
+                  "name_param": "performance_name", "children": "perf_main", "knobs": MAIN_KNOBS, "params": []},
+    "perf_main": level("Performance", [], lid="perf_main", knobs=K("key_mode", "split_point", "part_detune", "voice_assign",
                                                   "arp_switch", "arp_mode", "arp_beat", "tempo"),
-                       extra=[{"key": "perf_bank", "label": "Bank"}] +
-                             [{"level": lid, "label": lab} for lid, lab, _ in PERF_LEVELS]),
+                       extra=[{"level": lid, "label": lab} for lid, lab, _ in PERF_LEVELS]),
 }
 # perf_main knobs must be present in its params
-levels["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"], "short_name": byKey[k]["short"]}
+levels["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
+                                  "short_name": LEVEL_SHORT.get("perf_main", {}).get(k) or byKey[k]["short"]}
                                  for k in levels["perf_main"]["knobs"]] + levels["perf_main"]["params"]
 for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS:
-    levels[lid] = level(lab, keys)
+    levels[lid] = level(lab, keys, lid=lid)
+
+# A page that shows one word twice is ambiguous, and the contract cannot see it
+# -- only the rendered pixels can. Assert it here so the next regeneration
+# cannot quietly reintroduce what rendering all 23 grid pages just found.
+_dupes = {}
+for _lid, _lvl in levels.items():
+    _seen = {}
+    for _e in _lvl.get("params", []):
+        if not isinstance(_e, dict) or not _e.get("key"): continue
+        _s = (_e.get("short_name") or byKey.get(_e["key"], {}).get("short")
+              or _e.get("label") or _e["key"]).upper()
+        _seen.setdefault(_s, []).append(_e["key"])
+    _d = {k: v for k, v in _seen.items() if len(v) > 1}
+    if _d: _dupes[_lid] = _d
+assert not _dupes, "duplicate cell labels on a page: %s" % _dupes
 
 hierarchy = {"modes": ["patch", "performance"], "mode_param": "mode", "levels": levels}
+
+
+# panel_select is addressable but must not get its own chain_params row: the
+# user-facing control for it is the existing "Edit Part".
+CP_SKIP = {"panel_select"}
 
 # ---- chain_params -----------------------------------------------------------
 VIZ = {
@@ -294,10 +490,105 @@ VIZ = {
     "pitch_env_attack": ("penv", "attack"), "pitch_env_decay": ("penv", "decay"),
     "lfo1_waveform": ("lfo1", "shape"), "lfo1_rate": ("lfo1", "rate"),
 }
+# A viz graphic must sit inside ONE ROW of four, or it silently degrades to
+# separate bars and draws no curve -- which is exactly how the amp envelope
+# shipped on Main and Amp. Assert row-containment for every viz group, and for
+# the Ribbon/Velocity ADSR quartets too: those carry no graphic on purpose, but
+# a four-stage envelope split across a row (or a page) is still unreadable.
+_ROWS = 4
+_straddle = []
+for _lid, _lvl in levels.items():
+    _cells = [e["key"] for e in _lvl.get("params", []) if isinstance(e, dict) and e.get("key")]
+    for _pi in range(0, (len(_cells) + 7) // 8):
+        _page = _cells[_pi * 8:(_pi + 1) * 8]
+        _groups = {}
+        for _i, _k in enumerate(_page):
+            _g = VIZ.get(_k, (None,))[0]
+            if _g is None:
+                for _fam in ("ctl_", "vel_"):
+                    if _k.startswith(_fam) and "_env_" in _k and _k.rsplit("_env_", 1)[1].split("_")[0] in (
+                            "attack", "decay", "sustain", "sus", "release"):
+                        _g = _k[:_k.index("_env_")] + "_env"
+            if _g: _groups.setdefault(_g, []).append(_i)
+        for _g, _idx in _groups.items():
+            if len({_i // _ROWS for _i in _idx}) != 1:
+                _straddle.append((_lid, _pi + 1, _g, _idx))
+assert not _straddle, "viz/envelope group straddles a row: %s" % _straddle
+
+
+# ---- short_options: the enum square is two lines of THREE characters ---------
+# 191 option strings across 18 enums were longer than that, so they wrapped or
+# were cut on the cell -- "MANUAL" as MAN/UAL, "LOWER & UPPER" as a smear. The
+# fix is NOT to shorten the option itself: the held-knob header shows the full
+# value and must keep reading "MANUAL". `short_options` is a parallel array that
+# only the square consults, which is what it exists for.
+SHORT_OPT = {
+    "osc1_waveform": {"SUPER SAW": "SUP SAW", "TRIANGLE MOD": "TRI MOD", "FEEDBACK OSC": "FBK OSC",
+                      "NOISE": "NSE", "SQUARE": "SQR", "TRIANGLE": "TRI", "SAW": "SAW"},
+    "osc2_waveform": {"SQR (PWM)": "PWM", "TRIANGLE": "TRI", "SAW": "SAW", "NOISE": "NSE"},
+    "lfo1_waveform": {"TRIANGLE": "TRI", "SAWTOOTH": "SAW", "SQUARE": "SQR", "S&H": "S&H",
+                      "RANDOM": "RND", "NOISE": "NSE"},
+    "cutoff_slope": {"-12dB/oct": "-12", "-24dB/oct": "-24"},
+    "output_assign": {"MIX OUT": "MIX", "PARALLEL OUT": "PAR OUT"},
+    # The square is TWO lines of three, so a value that breaks at a space uses
+    # both of them -- "2 OCT" reads as 2/OCT, where "2OCT" crams one line and
+    # risks a cut. Prefer the split form; each token must fit three characters.
+    "arp_dest": {"LOWER & UPPER": "LOW UPP", "LOWER": "LOW", "UPPER": "UPP"},
+    "arp_mode": {"UP & DOWN": "UP DWN", "RANDOM": "RND", "DOWN": "DWN", "UP": "UP", "RPS": "RPS"},
+    "arp_range": {"1 OCTAVE": "1 OCT", "2 OCTAVES": "2 OCT", "3 OCTAVES": "3 OCT", "4 OCTAVES": "4 OCT"},
+    "trigger_dest": {"FILTER & AMP": "FLT AMP", "FILTER ENV": "FLT", "FILTER": "FLT",
+                     "AMPLITUDE ENV": "AMP", "AMP": "AMP"},
+    "delay_type": {"PANNING L->R": "PAN L>R", "PANNING R->L": "PAN R>L", "PANNING SHORT": "PAN SHT",
+                   "MONO SHORT": "MON SHT", "MONO LONG": "MON LNG"},
+    "key_mode": {"SINGLE": "SGL", "DUAL": "DUL", "SPLIT": "SPL"},
+    "amp_lfo1_mode": {"MANUAL": "MAN", "LFO1": "LFO1", "ENV": "ENV"},
+}
+
+def _short_sync(o):
+    """1/8 TRIPLET -> 1/8T, 1/16 DOTTED -> 1/16D, 8 MEASURES -> 8ME."""
+    if o in ("OFF", "LFO1"): return o[:4]
+    t = o.replace(" TRIPLET", "T").replace(" DOTTED", "D")
+    t = t.replace(" MEASURES", "ME").replace(" MEAS", "ME")
+    return t[:6] if all(len(x) <= 3 for x in t.split(" ")) else t.replace(" ", "")[:3]
+
+def _short_beat(o):
+    """The 90 arpeggio patterns: keep the family initial and its number."""
+    if o.startswith("NORMAL "): return o[7:][:6] if len(o[7:]) <= 3 else o[7:][:4]
+    for word, ab in (("PORTAMENTO ", "P"), ("SEQUENCE ", "S"), ("STRUMMING ", "ST"),
+                     ("PERCUSSION ", "PC"), ("REFRAIN ", "RF"), ("ECHO ", "EC"), ("MUTE ", "MU")):
+        if o.startswith(word): return (ab + o[len(word):].replace(" ", ""))[:6]
+    return o[:6]
+
+def short_options_for(key, opts):
+    m = SHORT_OPT.get(key)
+    if m is not None:
+        out = [m.get(o, o[:6]) for o in opts]
+    elif key.endswith(("_delay_sync", "_lfo1_sync", "_chorus_sync")):
+        out = [_short_sync(o) for o in opts]
+    elif key == "arp_beat":
+        out = [_short_beat(o) for o in opts]
+    elif any(len(o) > 6 for o in opts):
+        out = [o[:3] for o in opts]
+    else:
+        return None
+    # The square is two lines and breaks at a space, so the budget is PER LINE,
+    # not per string: "FLT AMP" fits as FLT/AMP where "FLTAMP" would be cut.
+    # Four narrow characters do fit a line -- "2OCT" and "1/12" render whole --
+    # so the cap is 4 per token, two tokens at most.
+    bad = [x for x in out if any(len(t) > 4 for t in x.split(" "))
+           or len(x.split(" ")) > 2]
+    assert not bad, (key, bad)
+    return out if any(a != b for a, b in zip(out, opts)) else None
+
 cp = []
 cp.append({"key": "mode", "name": "Mode", "type": "mode", "options": ["Patch", "Performance"]})
-cp.append({"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum", "options": ["Upper", "Lower", "Both"]})
+cp.append({"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum",
+           "options": ["Upper", "Lower", "Both"],
+           # declared here rather than through the params loop, so it needs its own
+           # short_options -- "Lower" was wrapping to LOW/ER in the square
+           "short_options": ["UPP", "LOW", "BTH"]})
 for p in params:
+    if p["key"] in CP_SKIP: continue
     e = {"key": p["key"], "name": p["name"], "type": p["type"]}
     if p["short"]: e["short_name"] = p["short"]
     if p["type"] == "int":
@@ -305,6 +596,8 @@ for p in params:
         e["default"] = p["default"] - p["off"] if not p.get("neg") else -p["default"]
     else:
         e["options"] = p["options"]
+        _so = short_options_for(p["key"], p["options"])
+        if _so: e["short_options"] = _so
         e["default"] = p["default"] - p["off"]
     if p["key"] == "tempo": e["unit"] = "BPM"
     if p["key"] in VIZ:

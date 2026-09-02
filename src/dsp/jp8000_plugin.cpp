@@ -105,8 +105,13 @@ typedef struct plugin_api_v2 {
 
 /* Parameters / presets (see "Parameters" below) */
 #define JP_SX_RING_SIZE     16384  /* one temp performance is ~560 B of DT1s */
-#define JP_MAX_BANKS        32
-#define JP_BANK_NAME_LEN    24
+/* 64, not 32. Charles's collection alone yields 34 patch banks and 29
+ * performance banks, so 32-per-kind silently truncated a real library. The
+ * arrays are name+size per bank, so the cost is bytes, not megabytes. */
+#define JP_MAX_BANKS        64
+/* 40, not 24: bank labels now carry a folder prefix so a nested library stays
+ * unambiguous, and 23 characters could not hold "folder/file" for real names. */
+#define JP_BANK_NAME_LEN    40
 #define JP_MAX_PRESETS      128
 #define JP_PRESET_NAME_LEN  17
 #define JP_SX_MAX_MSG       512    /* longest DT1 we ever build: 239 data + 12 */
@@ -344,7 +349,15 @@ struct jp8000_shm_t {
 
     /* Bank list, written by the child BEFORE child_ready, read-only after. */
     int patch_bank_count;
+    /* Files that matched a bank extension but yielded no bank. Silence here is
+     * indistinguishable from a broken browser -- in a real collection 41 of 97
+     * files parse to nothing -- so the count is published for the UI to say. */
+    int bank_files_skipped;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
+    /* Folder each bank came from, "" for the top of banks/. The browser walks
+     * folder -> bank -> preset. */
+    char patch_bank_folders[JP_MAX_BANKS][JP_BANK_NAME_LEN];
+    char perf_bank_folders[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     int patch_bank_sizes[JP_MAX_BANKS];
     int perf_bank_count;
     char perf_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
@@ -679,13 +692,20 @@ static void child_image_from_dt1(jp8000_shm_t *shm, const uint8_t *m, int len) {
         const uint32_t local = addr & 0xffff;
         const uint32_t block = local & 0xff00;
         uint32_t ignored;
-        if (block == JP_TEMP_COMMON)        img = img_for(shm, JP_AREA_COMMON, 0, &ignored, &bit, &cap);
-        else if (block == JP_TEMP_PART_UP)  img = img_for(shm, JP_AREA_PART_UP, 0, &ignored, &bit, &cap);
-        else if (block == JP_TEMP_PART_LO)  img = img_for(shm, JP_AREA_PART_LO, 0, &ignored, &bit, &cap);
-        else if ((local & 0xfe00) == JP_TEMP_PATCH_UP) img = img_for(shm, JP_AREA_PATCH, 0, &ignored, &bit, &cap);
-        else if ((local & 0xfe00) == JP_TEMP_PATCH_LO) img = img_for(shm, JP_AREA_PATCH, 1, &ignored, &bit, &cap);
+        /* The offset is relative to the BLOCK BASE, and the blocks are not all
+         * spaced the same: common/parts sit 0x100 apart, patches 0x200. A flat
+         * `local & 0x1ff` is only right for the patch blocks -- for PART_LO
+         * (0x1100) it yields 0x100, past the 7-byte cap, so every reply for the
+         * Lower part was silently dropped and IMG_PART_LO never validated. The
+         * whole Lower part page read as "unavailable". */
+        uint32_t base;
+        if (block == JP_TEMP_COMMON)        { img = img_for(shm, JP_AREA_COMMON, 0, &ignored, &bit, &cap); base = JP_TEMP_COMMON; }
+        else if (block == JP_TEMP_PART_UP)  { img = img_for(shm, JP_AREA_PART_UP, 0, &ignored, &bit, &cap); base = JP_TEMP_PART_UP; }
+        else if (block == JP_TEMP_PART_LO)  { img = img_for(shm, JP_AREA_PART_LO, 0, &ignored, &bit, &cap); base = JP_TEMP_PART_LO; }
+        else if ((local & 0xfe00) == JP_TEMP_PATCH_UP) { img = img_for(shm, JP_AREA_PATCH, 0, &ignored, &bit, &cap); base = JP_TEMP_PATCH_UP; }
+        else if ((local & 0xfe00) == JP_TEMP_PATCH_LO) { img = img_for(shm, JP_AREA_PATCH, 1, &ignored, &bit, &cap); base = JP_TEMP_PATCH_LO; }
         else return;  /* voice modulator etc. */
-        lin = jpbank::packed_to_linear(local & 0x1ff);
+        lin = jpbank::packed_to_linear(local - base);
     } else {
         return;
     }
@@ -745,6 +765,22 @@ struct jp8000_instance_t {
      * before the emulator can take a DT1. It is parked here and applied by
      * the boot thread once the child is ready; ui_ready gates every read
      * and edit until then so the grid never plans from an empty image. */
+    /* MIDI trace: what the SLOT actually delivers, timestamped. This is the
+     * only way to tell Move's sequencer and a note-generating MIDI FX apart
+     * from the synth -- jp8000_render bypasses the whole chain path.
+     *
+     * RT-safe by construction: v2_on_midi runs on the SPI callback, so it only
+     * writes into a preallocated ring (no allocation, no I/O, no lock). The
+     * dump happens in get_param, off that path. Armed by the file
+     * /data/UserData/schwung/jp8000_midi_trace_on, checked once at create. */
+    struct midi_trace_ev { uint64_t us; uint8_t len, b[7]; };
+    static const int MIDI_TRACE_CAP = 4096;
+    midi_trace_ev *trace;
+    volatile unsigned trace_w;
+    uint64_t trace_t0;
+    int trace_on;
+    volatile int trace_stop;
+
     char pending_state[4096];
     volatile int pending_state_set;
     volatile int ui_ready;
@@ -847,9 +883,42 @@ static void child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
 }
 
 /* System settings the editor needs, sent once at boot (what the JUCE
- * editor forces in parseSystemParameters, with two differences: program
- * changes stay enabled — Bank Select + PC — and the Performance Control
- * Channel is left where the user put it). */
+ * editor forces in parseSystemParameters, with one difference: program
+ * changes stay enabled — Bank Select + PC).
+ *
+ * RemoteControlChannel is what makes the ARPEGGIATOR work, and leaving it at
+ * the firmware default (0x11 = Off) is why it never did. The JP-8000 has two
+ * different note paths: a note on a part's own Part::MidiChannel is handed
+ * straight to that part's voices, while a note on the Remote Control Channel
+ * enters the "as if played on the panel keyboard" path — which is the only one
+ * that feeds the arpeggiator, and the only one that applies KeyMode (split /
+ * dual) and the panel selection. Measured: with the remote channel Off, a held
+ * chord on Chariots (ArpSwitch=1, Dest=LOWER, Tempo=74) produces exactly one
+ * voice start and nothing more; with it set, 31 voice starts at a dead-regular
+ * 0.405 s, an eighth note at 74 BPM. The remote path takes the note INSTEAD of
+ * the part, so nothing double-triggers, and with the arp off it still plays
+ * normally.
+ *
+ * Channel 3 (value 2), the same one the JUCE editor uses. That leaves three
+ * distinct note paths, which is the point:
+ *
+ *   ch1 -> Upper part directly   (Part::MidiChannel, no arp, no split)
+ *   ch2 -> Lower part directly   (Part::MidiChannel, no arp, no split)
+ *   ch3 -> keyboard path         (arpeggiator + KeyMode split/dual)
+ *
+ * "All" (16) also arps, on every channel, but it swallows ch1/ch2 into the
+ * keyboard path and the parts stop being individually addressable.
+ *
+ * To reach ch3 the slot must forward there. Note that "Auto" does NOT mean
+ * "ask the module" -- shadow_chain_remap_channel returns the RECEIVE channel
+ * for forward_channel == -1 -- so an Auto slot with receive=1 forwards on ch1
+ * and will not arp. capabilities.default_forward_channel (3) only pre-seeds
+ * forward_channel at four load call sites in shadow_chain_mgmt.c, and only
+ * while it is still -1. For all three paths at once, set the slot to
+ * Receive=All + Forward=THRU: THRU preserves the incoming channel, so ch1/ch2/
+ * ch3 then select Upper/Lower/arp.
+ *
+ * carries no notes at all. */
 static void child_boot_force_system(jeLib::Je8086 &je) {
     using jeLib::SystemParameter;
     using jeLib::State;
@@ -859,6 +928,8 @@ static void child_boot_force_system(jeLib::Je8086 &je) {
     child_send_dump(je, State::createParameterChange(SystemParameter::MidiSync, 1));
     child_send_dump(je, State::createParameterChange(SystemParameter::KeyboardShift, 2));
     child_send_dump(je, State::createParameterChange(SystemParameter::TxRxProgramChangeSwitch, 2));
+    child_send_dump(je, State::createParameterChange(SystemParameter::RemoteControlChannel, 2));
+    child_send_dump(je, State::createParameterChange(SystemParameter::PerformanceControlChannel, 0x11));
     child_send_dump(je, State::createSystemRequest());
     child_request_temp(je);
 }
@@ -904,25 +975,53 @@ static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_ba
     vlog("[child] factory: %zu patch banks, %zu perf banks", banks.patch.size(), banks.perf.size());
 
     std::vector<jpbank::Bank> user;
-    jpbank::scan_dir(std::string(shm->module_dir) + "/banks", user, JP_BANK_NAME_LEN - 1);
+    int skipped = 0;
+    jpbank::scan_dir(std::string(shm->module_dir) + "/banks", user, JP_BANK_NAME_LEN - 1, &skipped);
+    if (skipped > 0)
+        vlog("[child] banks: %d file(s) matched an extension but produced no bank", skipped);
+    shm->bank_files_skipped = skipped;
     for (auto &b : user) {
         vlog("[child] bank file: %s (%zu %s)", b.name.c_str(), b.presets.size(), b.is_perf ? "perfs" : "patches");
         (b.is_perf ? banks.perf : banks.patch).push_back(std::move(b));
     }
 
     auto publish = [](const std::vector<jpbank::Bank> &src, int *count,
-                      char (*names)[JP_BANK_NAME_LEN], int *sizes) {
+                      char (*names)[JP_BANK_NAME_LEN], int *sizes,
+                      char (*folders)[JP_BANK_NAME_LEN]) {
         int n = 0;
         for (const auto &b : src) {
             if (n >= JP_MAX_BANKS) break;
             snprintf(names[n], JP_BANK_NAME_LEN, "%s", b.name.c_str());
+            snprintf(folders[n], JP_BANK_NAME_LEN, "%s", b.folder.c_str());
             sizes[n] = (int)std::min<size_t>(b.presets.size(), JP_MAX_PRESETS);
             n++;
         }
         *count = n;
     };
-    publish(banks.patch, &shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes);
-    publish(banks.perf, &shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes);
+    /* Two banks the user cannot tell apart are a broken list, and truncation
+     * makes that easy: several of these paths differ only past the label
+     * window. Disambiguate with a counted suffix rather than hoping the window
+     * is wide enough. */
+    auto uniquify = [](std::vector<jpbank::Bank> &list) {
+        for (size_t i = 0; i < list.size(); i++) {
+            int dup = 1;
+            for (size_t j = 0; j < i; j++) {
+                if (list[j].name != list[i].name || list[j].folder != list[i].folder) continue;
+                char suffix[8];
+                snprintf(suffix, sizeof(suffix), " %d", ++dup + 1);
+                std::string base = list[i].name;
+                const size_t room = (size_t)JP_BANK_NAME_LEN - 1 - strlen(suffix);
+                if (base.size() > room) base = base.substr(0, room);
+                list[i].name = base + suffix;
+                j = (size_t)-1;   /* recheck from the top against the new name */
+            }
+        }
+    };
+    uniquify(banks.patch);
+    uniquify(banks.perf);
+
+    publish(banks.patch, &shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes, shm->patch_bank_folders);
+    publish(banks.perf, &shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes, shm->perf_bank_folders);
     SHM_STORE_FENCE();
 }
 
@@ -1330,7 +1429,7 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
         close(inst->pipeline_lock_fd);
         inst->pipeline_lock_fd = -1;
         snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                 "JP-8000 is already running in another slot (one per device)");
+                 "JE-8086 is already running in another slot (one per device)");
         shm->initialized = 1; shm->loading_complete = 1;
         return -1;
     }
@@ -1401,6 +1500,38 @@ static void* boot_thread_func(void *arg) {
         SHM_STORE_FENCE();
         inst->ui_ready = 1;
     }
+
+    /* When the MIDI trace is armed, this thread stays on as its writer: the
+     * ring is filled on the SPI callback and must never do I/O, so the file is
+     * written here instead. The thread is already SCHED_OTHER for the same
+     * reason the child drops out of FIFO -- create_instance is called from the
+     * callback, so an inherited priority would be FIFO 70. */
+    if (inst->trace_on && inst->trace) {
+        struct sched_param sp; sp.sched_priority = 0;
+        pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
+        FILE *tf = fopen("/data/UserData/schwung/jp8000_midi_trace.log", "w");
+        unsigned last = 0;
+        while (tf && !inst->trace_stop) {
+            const unsigned w = inst->trace_w;
+            if (w != last) {
+                unsigned from = last;
+                if (w - from > (unsigned)jp8000_instance_t::MIDI_TRACE_CAP)
+                    from = w - (unsigned)jp8000_instance_t::MIDI_TRACE_CAP;
+                for (unsigned i = from; i < w; i++) {
+                    const jp8000_instance_t::midi_trace_ev &e =
+                        inst->trace[i % jp8000_instance_t::MIDI_TRACE_CAP];
+                    fprintf(tf, "%9.4f", (double)e.us / 1e6);
+                    for (int k = 0; k < e.len && k < 7; k++) fprintf(tf, " %02X", e.b[k]);
+                    fprintf(tf, "\n");
+                }
+                fflush(tf);
+                last = w;
+            }
+            usleep(200000);
+        }
+        if (tf) fclose(tf);
+    }
+
     inst->boot_thread_running = 0;
     return nullptr;
 }
@@ -1413,6 +1544,23 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     (void)json_defaults;
 
     jp8000_instance_t *inst = (jp8000_instance_t*)calloc(1, sizeof(jp8000_instance_t));
+    /* The device boots from boot.snap into PERFORM with a performance loaded,
+     * so Patch (calloc's 0) was the UI claiming a mode the synth was not in.
+     * `mode` only picks which browser is shown -- it is never sent -- so this
+     * is purely about telling the truth on entry. */
+    if (inst) inst->mode = 1;
+    /* MIDI trace, off unless armed by a file (house style: every diagnostic
+     * switch off by default). Allocated here, on the control thread. */
+    if (inst) {
+        inst->trace_on = access("/data/UserData/schwung/jp8000_midi_trace_on", F_OK) == 0
+                       || getenv("JP_MIDI_TRACE") != nullptr;
+        if (inst->trace_on) {
+            inst->trace = (jp8000_instance_t::midi_trace_ev*)
+                calloc(jp8000_instance_t::MIDI_TRACE_CAP, sizeof(jp8000_instance_t::midi_trace_ev));
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            inst->trace_t0 = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+        }
+    }
     if (!inst) return nullptr;
 
     inst->shm = (jp8000_shm_t*)mmap(nullptr, sizeof(jp8000_shm_t),
@@ -1439,6 +1587,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
 
 static void v2_destroy_instance(void *instance) {
     jp8000_instance_t *inst = (jp8000_instance_t*)instance;
+    if (inst) inst->trace_stop = 1;
     if (!inst) return;
     fprintf(stderr, "JP-8000: destroying\n");
 
@@ -1476,6 +1625,18 @@ static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) 
     uint8_t modified[8];
     int n = len > 8 ? 8 : len;
     memcpy(modified, msg, n);
+
+    if (inst->trace_on && inst->trace) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);           /* vDSO, ~340 ns */
+        const uint64_t us = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+        jp8000_instance_t::midi_trace_ev &e =
+            inst->trace[inst->trace_w % jp8000_instance_t::MIDI_TRACE_CAP];
+        e.us = us - inst->trace_t0;
+        e.len = (uint8_t)n;
+        memcpy(e.b, modified, (size_t)(n > 7 ? 7 : n));
+        inst->trace_w++;
+    }
 
     midi_fifo_push(inst->shm, modified, n);
     inst->shm->midi_count++;
@@ -1644,6 +1805,72 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
     SHM_STORE_FENCE();
 }
 
+/* ---- Bank hierarchy: folder -> bank -> preset -------------------------
+ *
+ * A real preset library is nested (Charles's is 97 files across 30 folders),
+ * and a flat list of 36 labels, each a truncated path, is unreadable on a
+ * 128-pixel screen. So the browser walks folders first.
+ *
+ * The folder is DERIVED from the selected bank rather than stored beside it:
+ * one source of truth, so the two cannot drift out of step. Folders are listed
+ * in order of first appearance, which keeps "" (the top of banks/, where the
+ * factory banks live) first.
+ */
+struct bank_view {
+    int count;
+    char (*names)[JP_BANK_NAME_LEN];
+    char (*folders)[JP_BANK_NAME_LEN];
+    int *sel;                       /* the instance's bank index for this mode */
+};
+
+static bank_view bank_view_for(jp8000_instance_t *inst) {
+    jp8000_shm_t *shm = inst->shm;
+    if (inst->mode)
+        return bank_view{shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_folders, &inst->perf_bank};
+    return bank_view{shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_folders, &inst->bank};
+}
+
+/* Nth distinct folder, in order of first appearance. Returns nullptr past the
+ * end; *out_count (when given) receives the number of distinct folders. */
+static const char *bank_folder_at(const bank_view &v, int want, int *out_count) {
+    int found = 0;
+    const char *hit = nullptr;
+    for (int i = 0; i < v.count; i++) {
+        bool seen = false;
+        for (int j = 0; j < i && !seen; j++)
+            if (strcmp(v.folders[j], v.folders[i]) == 0) seen = true;
+        if (seen) continue;
+        if (found == want) hit = v.folders[i];
+        found++;
+    }
+    if (out_count) *out_count = found;
+    return hit;
+}
+
+static int bank_folder_index(const bank_view &v, int bank) {
+    if (bank < 0 || bank >= v.count) return 0;
+    int idx = 0;
+    for (int i = 0; i < bank; i++) {
+        bool seen = false;
+        for (int j = 0; j < i && !seen; j++)
+            if (strcmp(v.folders[j], v.folders[i]) == 0) seen = true;
+        if (!seen && strcmp(v.folders[i], v.folders[bank]) != 0) idx++;
+    }
+    return idx;
+}
+
+/* The Nth bank inside `folder`, and how many that folder holds. */
+static int bank_in_folder(const bank_view &v, const char *folder, int want, int *out_count) {
+    int found = 0, hit = -1;
+    for (int i = 0; i < v.count; i++) {
+        if (strcmp(v.folders[i], folder) != 0) continue;
+        if (found == want) hit = i;
+        found++;
+    }
+    if (out_count) *out_count = found;
+    return hit;
+}
+
 static void v2_set_param(void *instance, const char *key, const char *val) {
     jp8000_instance_t *inst = (jp8000_instance_t*)instance;
     if (!inst || !inst->shm || !key || !val) return;
@@ -1666,7 +1893,33 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (m >= 0) inst->mode = m;
         return;
     }
-    if (strcmp(key, "part") == 0) { inst->part = clampi(atoi(val), 0, 2); return; }
+    if (strcmp(key, "part") == 0) {
+        /* Edit Part IS the hardware's Panel Select (perf-common 0x12). It used
+         * to be a UI-only int, so the panel and our selector could disagree
+         * about which part an edit addressed. */
+        inst->part = clampi(atoi(val), 0, 2);
+        const jp_param_t *ps = jp_find_param("panel_select");
+        if (ps) param_write(inst, ps, inst->part);
+        return;
+    }
+    if (strcmp(key, "bank_folder") == 0 || strcmp(key, "bank_in_folder") == 0) {
+        const bank_view v = bank_view_for(inst);
+        if (v.count <= 0) return;
+        const int sel = clampi(*v.sel, 0, v.count - 1);
+        const bool infolder = key[5] == 'i';
+        int target;
+        if (infolder) {
+            target = bank_in_folder(v, v.folders[sel], atoi(val), nullptr);
+        } else {
+            const char *f = bank_folder_at(v, atoi(val), nullptr);
+            target = f ? bank_in_folder(v, f, 0, nullptr) : -1;   /* first bank in it */
+        }
+        if (target < 0) return;
+        *v.sel = target;
+        if (inst->mode) { inst->perf_bank = target; shm->perf_bank_req = target; }
+        else            { inst->bank = target;      shm->patch_bank_req = target; }
+        return;
+    }
     if (strcmp(key, "bank") == 0) {
         inst->bank = clampi(atoi(val), 0, shm->patch_bank_count > 0 ? shm->patch_bank_count - 1 : 0);
         shm->patch_bank_req = inst->bank;
@@ -1697,7 +1950,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
 /* chain_params = generated prefix + the two bank enums, whose options are
  * only known once the child has scanned banks/. */
 static int chain_params_get(jp8000_shm_t *shm, char *buf, int buf_len) {
-    if (!shm->child_ready) return -1;
+    /* Also ungated, for the reason ui_hierarchy is: the metadata is what lets
+     * the grid plan a page at all. Only the two bank enums depend on the
+     * child's scan, and bank_enum already emits "None" at count 0; the chain
+     * host re-reads chain_params on a throttle, so the real bank names land
+     * once the scan finishes. */
     int n = snprintf(buf, buf_len, "%s", jp_chain_params_prefix);
     auto bank_enum = [&](const char *key, const char *name, int count, char (*names)[JP_BANK_NAME_LEN]) {
         n += snprintf(buf + n, n < buf_len ? buf_len - n : 0,
@@ -1723,7 +1980,11 @@ static int chain_params_get(jp8000_shm_t *shm, char *buf, int buf_len) {
 
 static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
     jp8000_instance_t *inst = (jp8000_instance_t*)instance;
-    if (!inst || !inst->shm || !key) return 0;
+    /* -1, not 0: the host's JS bridge builds the string from `buf` and ignores
+     * the length we return (schwung_host.c js_host_module_get_param), so a >=0
+     * return that leaves `buf` unwritten hands the caller whatever the last
+     * call left on that stack slot. Only -1 reads as "no answer". */
+    if (!inst || !inst->shm || !key) return -1;
     jp8000_shm_t *shm = inst->shm;
 
     if (strcmp(key, "__ui") == 0) {
@@ -1731,11 +1992,47 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
 
     if (strcmp(key, "chain_params") == 0) return chain_params_get(shm, buf, buf_len);
-    if (strcmp(key, "ui_hierarchy") == 0) {
-        if (!shm->child_ready) return -1;
+    /*
+     * UNGATED, exactly as braids serves it (braids_plugin.cpp:801).
+     *
+     * `jp_ui_hierarchy` is a static string generated from jp8000_params.h --
+     * it describes the page STRUCTURE and depends on nothing the child does.
+     * Gating it on child_ready cost the shadow UI its whole reason to build
+     * pages for the 30-60s the emulator takes to boot: getComponentHierarchy
+     * answers null, enterComponentEdit falls through to the bare preset
+     * browser, and with no presets yet that is the "No presets" dead end
+     * (shadow_ui.js:13332). The values behind these keys are still gated --
+     * get_param answers -1 per key until ui_ready -- which is the honest
+     * "not yet", and the UI redraws as they arrive.
+     */
+    if (strcmp(key, "ui_hierarchy") == 0)
         return snprintf(buf, buf_len, "%s", jp_ui_hierarchy);
-    }
     if (strcmp(key, "state") == 0) return state_get(inst, buf, buf_len);
+
+    /*
+     * THE COMPONENT-ENTRY GATE'S THIRD QUESTION.
+     *
+     * shared/component_load_gate.mjs decides ENTER / HOLD / FALLBACK when a
+     * component editor is opened. An empty ui_hierarchy is ambiguous -- "this
+     * module declares none" and "this module has not finished arriving" both
+     * read "" -- so the gate asks `<prefix>:is_loading`, and "1" means HOLD:
+     * it raises the "Loading..." view and probes again (~0.5s for ~20s, then
+     * every 10s) instead of committing, irreversibly, to the bare preset
+     * browser. That fallback is the "No presets" dead end; docs/SHADOW_UI.md
+     * names Osirus and MiniJV as the reports behind the gate, and jp8000 is
+     * the same shape -- create_instance returns in ~20ms having forked, and
+     * the emulator is only ready ~4s later.
+     *
+     * Answered BEFORE the ui_ready gate, and phrased exactly as jv880 phrases
+     * it (jv880_plugin.cpp:4141): a load ERROR is not still-loading, or the
+     * editor would hold forever on a synth that is never coming up.
+     */
+    if (strcmp(key, "is_loading") == 0)
+        return snprintf(buf, buf_len, "%d",
+                        (!shm->loading_complete && !shm->load_error[0]) ? 1 : 0);
+    /* The name the editor puts in its header and its announcement; without it
+     * enterComponentEditFallback announces the raw component key. */
+    if (strcmp(key, "name") == 0) return snprintf(buf, buf_len, "JE-8086");
 
     if (!inst->ui_ready) {
         /* Not a value yet — a read that cannot be answered is -1, never
@@ -1743,11 +2040,83 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (strcmp(key, "__status") != 0) return -1;
     } else {
         if (strcmp(key, "mode") == 0) return snprintf(buf, buf_len, "%s", inst->mode ? "Performance" : "Patch");
-        if (strcmp(key, "part") == 0) return snprintf(buf, buf_len, "%d", inst->part);
+        if (strcmp(key, "part") == 0) {
+            /* Prefer the device's own Panel Select; inst->part is the fallback
+             * while the image is still filling. */
+            const jp_param_t *ps = jp_find_param("panel_select");
+            int v;
+            if (ps && param_read(inst, ps, &v) == 0) return snprintf(buf, buf_len, "%d", v);
+            return snprintf(buf, buf_len, "%d", inst->part);
+        }
         if (strcmp(key, "bank") == 0) return snprintf(buf, buf_len, "%d", inst->bank);
         if (strcmp(key, "perf_bank") == 0) return snprintf(buf, buf_len, "%d", inst->perf_bank);
         if (strcmp(key, "patch") == 0) return snprintf(buf, buf_len, "%d", inst->patch);
         if (strcmp(key, "performance") == 0) return snprintf(buf, buf_len, "%d", inst->performance);
+        /* Bank hierarchy: folder -> bank -> preset. Mode-aware, so Patch mode
+         * walks patch banks and Performance mode performance banks. */
+        if (strncmp(key, "bank_folder", 11) == 0 || strncmp(key, "bank_in_folder", 14) == 0) {
+            const bank_view v = bank_view_for(inst);
+            if (v.count <= 0) return -1;
+            const int sel = clampi(*v.sel, 0, v.count - 1);
+            const bool infolder = key[5] == 'i';
+            const char *rest = key + (infolder ? 14 : 11);
+            const char *cur_folder = v.folders[sel];
+            if (strcmp(rest, "_count") == 0) {
+                int n = 0;
+                if (infolder) bank_in_folder(v, cur_folder, -1, &n);
+                else bank_folder_at(v, -1, &n);
+                return snprintf(buf, buf_len, "%d", n);
+            }
+            if (strncmp(rest, "_name", 5) == 0) {
+                int idx = infolder ? bank_in_folder(v, cur_folder, -1, nullptr) : 0;
+                idx = infolder ? 0 : 0;
+                const char *sfx = rest + 5;
+                int want;
+                if (sfx[0] == ':') want = atoi(sfx + 1);
+                else if (!sfx[0]) want = infolder ? -2 : -2;   /* current */
+                else return -1;
+                if (want == -2) {
+                    if (infolder) return snprintf(buf, buf_len, "%s", v.names[sel]);
+                    return snprintf(buf, buf_len, "%s", cur_folder[0] ? cur_folder : "Banks");
+                }
+                if (infolder) {
+                    const int b = bank_in_folder(v, cur_folder, want, nullptr);
+                    if (b < 0) return -1;
+                    return snprintf(buf, buf_len, "%s", v.names[b]);
+                }
+                const char *f = bank_folder_at(v, want, nullptr);
+                if (!f) return -1;
+                return snprintf(buf, buf_len, "%s", f[0] ? f : "Banks");
+                (void)idx;
+            }
+            if (!rest[0]) {
+                if (infolder) {
+                    int pos = 0;
+                    for (int i = 0; i < sel; i++)
+                        if (strcmp(v.folders[i], cur_folder) == 0) pos++;
+                    return snprintf(buf, buf_len, "%d", pos);
+                }
+                return snprintf(buf, buf_len, "%d", bank_folder_index(v, sel));
+            }
+            return -1;
+        }
+        if (strcmp(key, "__midi_trace") == 0) {
+            if (!inst->trace) return snprintf(buf, buf_len, "(not armed)");
+            const unsigned w = inst->trace_w;
+            const unsigned start = w > (unsigned)jp8000_instance_t::MIDI_TRACE_CAP
+                                 ? w - (unsigned)jp8000_instance_t::MIDI_TRACE_CAP : 0;
+            int n = snprintf(buf, buf_len, "events=%u\n", w);
+            for (unsigned i = start; i < w && n < buf_len - 64; i++) {
+                const jp8000_instance_t::midi_trace_ev &e =
+                    inst->trace[i % jp8000_instance_t::MIDI_TRACE_CAP];
+                n += snprintf(buf + n, buf_len - n, "%9.4f", (double)e.us / 1e6);
+                for (int k = 0; k < e.len && k < 7; k++) n += snprintf(buf + n, buf_len - n, " %02X", e.b[k]);
+                n += snprintf(buf + n, buf_len - n, "\n");
+            }
+            return n;
+        }
+        if (strcmp(key, "banks_skipped") == 0)
+            return snprintf(buf, buf_len, "%d", shm->bank_files_skipped);
         if (strcmp(key, "patch_count") == 0)
             return snprintf(buf, buf_len, "%d", shm->patch_bank_count > 0 ? shm->patch_bank_sizes[inst->bank] : 0);
         if (strcmp(key, "performance_count") == 0)
@@ -1758,8 +2127,34 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             const bool perf = key[0] == 'p' && key[1] == 'e';
             const char *suffix = key + (perf ? 16 : 10);
             int idx = perf ? inst->performance : inst->patch;
+            /* Bare `patch_name` / `performance_name` is "what is LOADED", read
+             * out of the temp image, and it follows Edit Part. The browser row
+             * is not the answer: a factory performance carries its own patches
+             * (Chariots' parts read PatchBank = IN PERFORMANCE), so what sounds
+             * is "Chariots U", not whatever the patch list happens to be
+             * pointing at. The `:N` form stays the browser row name. */
+            if (!suffix[0]) {
+                uint32_t block; int bit, cap;
+                const int rp = (!perf && inst->part == 1) ? 1 : 0;
+                const uint8_t *img = img_for(shm, perf ? JP_AREA_COMMON : JP_AREA_PATCH,
+                                             rp, &block, &bit, &cap);
+                if ((shm->img_valid & bit) && cap >= 16) {
+                    SHM_LOAD_FENCE();
+                    char nm[17];
+                    for (int c = 0; c < 16; c++) {
+                        const uint8_t ch = img[c];
+                        nm[c] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : ' ';
+                    }
+                    nm[16] = '\0';
+                    int e = 16; while (e > 0 && nm[e - 1] == ' ') e--;
+                    nm[e] = '\0';
+                    if (e > 0) return snprintf(buf, buf_len, "%s", nm);
+                }
+                /* image not filled yet -- say so, never invent a name */
+                return -1;
+            }
             if (suffix[0] == ':') idx = atoi(suffix + 1);
-            else if (suffix[0]) return -1;
+            else return -1;
             if (perf ? (shm->perf_bank_cur != inst->perf_bank) : (shm->patch_bank_cur != inst->bank)) return -1;
             if (idx < 0 || idx >= JP_MAX_PRESETS) return -1;
             SHM_LOAD_FENCE();
@@ -1786,7 +2181,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         /* Per-stage sample counters, so a stall can be pinned on the stage
          * that stopped rather than read off the ring alone. */
         int n = snprintf(buf, buf_len,
-            "{\"status\":\"ready\",\"message\":\"JP-8000 Ready\","
+            "{\"status\":\"ready\",\"message\":\"JE-8086 Ready\","
             "\"ring\":%d,\"underruns\":%d,\"midi\":%d,\"peak\":%d,\"min\":%d,\"produced\":[",
             audio_ring_available(shm), shm->underrun_count, shm->midi_count,
             shm->out_peak, shm->out_min);

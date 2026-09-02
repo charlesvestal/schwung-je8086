@@ -1,13 +1,13 @@
 {
     "id": "jp8000",
-    "name": "JP-8000",
+    "name": "JE-8086",
     "abbrev": "JP",
     "version": "0.1.0",
-    "description": "Roland JP-8000 SuperSaw emulator (Gearmulator JE-8086)",
+    "description": "JE-8086 SuperSaw synth emulator (Gearmulator)",
     "author": "dsp56300/gearmulator (port: charlesvestal)",
-    "ui": "ui.js",
     "dsp": "dsp.so",
     "api_version": 2,
+    "standalone": false,
     "assets": {
         "path": "roms",
         "label": "ROMs",
@@ -15,8 +15,8 @@
             ".mid",
             ".bin"
         ],
-        "description": "Requires JP-8000 ROM files (.mid firmware dump). Place all 8 .mid files from the JP-8000 v1.5 firmware in the roms/ folder.",
-        "hint": "The emulator runs as three pipelined stages on cores 0-2, off the audio core. Only one JP-8000 can run at a time.",
+        "description": "Requires the original JP-8000 ROM files (.mid firmware dump). Place all 8 .mid files from the v1.5 firmware in the roms/ folder.",
+        "hint": "The emulator runs as three pipelined stages on cores 0-2, off the audio core. Only one JE-8086 can run at a time.",
         "hint_url": "https://github.com/charlesvestal/schwung-jp8000",
         "hint_url_label": "Read more",
         "folders": [
@@ -41,7 +41,7 @@
         "audio_in": false,
         "midi_in": true,
         "midi_out": false,
-        "default_forward_channel": 1,
+        "default_forward_channel": 3,
         "chainable": true,
         "component_type": "sound_generator"
     },
