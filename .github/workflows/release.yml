@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Init the submodules the plugin needs
+        run: |
+          git submodule update --init libs/gearmulator
+          git -C libs/gearmulator submodule update --init source/dsp56300 source/mc68k
+          git -C libs/gearmulator/source/dsp56300 submodule update --init source/asmjit
+
+      - name: Build
+        run: ./scripts/build.sh
+
+      - name: Check the artifact is actually ARM64
+        run: |
+          test -f dist/jp8000-module.tar.gz
+          file dist/jp8000/dsp.so | tee /dev/stderr | grep -q 'ARM aarch64'
+          # The tarball must contain a top-level jp8000/ or the Module Store
+          # extracts into the wrong place.
+          tar tzf dist/jp8000-module.tar.gz | head -1 | grep -q '^jp8000/'
+          # ROMs are the user's to supply and must never ship.
+          ! tar tzf dist/jp8000-module.tar.gz | grep -qE 'roms/.+\.(mid|bin)$'
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/jp8000-module.tar.gz \
+            --title "${GITHUB_REF_NAME}" --generate-notes || \
+          gh release upload "${GITHUB_REF_NAME}" dist/jp8000-module.tar.gz --clobber
+
+      # release.json is what the Module Store reads to decide a version is
+      # available. Without this step a tagged release is invisible to it.
+      - name: Point release.json at this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/jp8000-module.tar.gz"
+          printf '{\n  "version": "%s",\n  "download_url": "%s"\n}\n' "$VER" "$URL" > release.json
+          if ! git diff --quiet release.json; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add release.json
+            git commit -m "release.json -> ${GITHUB_REF_NAME}"
+            git push origin HEAD:main
+          fi
