@@ -2,8 +2,8 @@
  * JP-8000 DSP Plugin for Schwung
  *
  * Runs the JE-8086 (Roland JP-8000) emulator using fork-parallel processing:
- *   Parent process: H8S microcontroller + ASIC0+1 on core 2
- *   Child process:  ASIC2+3 direct sample loop on core 3 (no H8S)
+ *   Stage 0:        H8S microcontroller + ASIC0 on core 3
+ *   Child stages:   ASIC runs on cores 1/2 (see JE_DEFAULT_CORES)
  *
  * Communication via mmap'd shared memory:
  *   - GRAM ring: parent → child (ASIC1→ASIC2 handoff, 6×int32_t per sample)
@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
+#include <sys/file.h>
 #include <signal.h>
 #include <sched.h>
 #include <errno.h>
@@ -112,12 +113,34 @@ typedef struct plugin_api_v2 {
  *
  * Boundaries can be overridden without a rebuild by writing e.g. "1,2" or "2"
  * to JE_PIPELINE_FILE (read once at load); cores likewise via a second line
- * "2,1,0" (stage0, stage1, ...). Core 3 is the SPI core and is never used
- * by default. */
+ * "3,1,2" (stage0, stage1, ...).
+ *
+ * Cores. Move confines EVERY thread of its own process to cores 0-2 — the
+ * FIFO 70 SPI thread and the Audio Workers included — and leaves core 3 to
+ * the SPI DMA IRQ thread (`irq/25-DMA IRQ`, pinned there) and whatever
+ * Schwung floats. "Core 3 is the SPI core" was true only of that IRQ thread,
+ * which outranks a FIFO 20 stage and costs it ~10%. Measured 2026-09-02, a
+ * set playing on native instruments plus an 8-note chord here: with the
+ * stages on 2/1/0, Move's UI thread (SCHED_OTHER, main) got 5% of a core and
+ * the LCD froze between repaints; with stage 0 on core 3 it got 40% — the
+ * same 40% it gets with this module silent — at 0 underruns. So the heaviest
+ * stage lives on core 3 and Move's cores carry two stages instead of three.
+ *
+ * Which two cores does not matter, but they must be DIFFERENT ones, and the
+ * budget is the Linux RT throttle (950 ms of realtime per core per second,
+ * not shared; `rt_time` in /sys/kernel/debug/sched/debug), which parks Move's
+ * FIFO 70 audio worker along with us when a core hits it. Measured 2026-09-02
+ * with a set playing plus 8-voice chords: an empty Move core reads ~380 ms,
+ * core 3 without us ~50, and the stages cost ~630 / ~330 / ~490 (stage 0 is
+ * ~12.6 us/sample under full polyphony — the 8.5 above was a quiet patch).
+ * So stage 0 fits ONLY on core 3 (380 + 630 > 950 anywhere else), two stages
+ * on one Move core do not fit (380 + 330 + 490), and {3,1,2} leaves ~270 ms/s
+ * on core 3 for every other module's render (all of which runs in the SPI
+ * callback there). */
 #define JE_MAX_STAGES       4
 #define JE_PIPELINE_FILE    "/data/UserData/schwung/jp8000_pipeline"
 static const int JE_DEFAULT_BOUNDS[JE_MAX_STAGES - 1] = {1, 2, 0};
-static const int JE_DEFAULT_CORES[JE_MAX_STAGES]      = {2, 1, 0, 0};
+static const int JE_DEFAULT_CORES[JE_MAX_STAGES]      = {3, 1, 2, 0};
 
 /* ARM memory barriers for cross-process SPSC ring buffers.
  * Without these, ARM's weak memory ordering lets the index update
@@ -330,6 +353,10 @@ static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t 
  * whatever this leaves in place.
  */
 #define JP8000_RT_PRIO 20
+/* Experiment switch (not a setting): with this file present the stages leave
+ * the realtime class entirely, so the in-host cost of SCHED_OTHER can be
+ * measured against the FIFO 20 number above. Checked once per stage. */
+#define JP8000_SCHED_OTHER_ARM_FILE "/data/UserData/schwung/jp8000_sched_other_on"
 static void child_clamp_realtime(jp8000_shm_t *shm) {
     (void)shm;
 #ifdef __linux__
@@ -340,6 +367,13 @@ static void child_clamp_realtime(jp8000_shm_t *shm) {
     }
     struct sched_param sp{};
     sched_getparam(0, &sp);
+    if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) {
+        struct sched_param other{};
+        const int rc = sched_setscheduler(0, SCHED_OTHER, &other);
+        vlog("[child] sched: inherited FIFO %d -> SCHED_OTHER by arming file (rc=%d, now pol=%d)",
+             sp.sched_priority, rc, sched_getscheduler(0));
+        return;
+    }
     if (sp.sched_priority <= JP8000_RT_PRIO) {
         vlog("[child] sched: inherited FIFO %d, leaving it", sp.sched_priority);
         return;
@@ -354,19 +388,35 @@ static void child_clamp_realtime(jp8000_shm_t *shm) {
 
 /* Wait for a cross-process condition: spin briefly (the other side is one
  * sample away most of the time), then back off to usleep so an idle core is
- * not burned while the parent throttles on the audio ring. */
+ * not burned while the parent throttles on the audio ring.
+ *
+ * The back-off is exponential up to 250 us, and it has to be. Stage 0 fills
+ * the audio ring in bursts (one block every 2.9 ms, at its throttle level);
+ * stages 1/2 finish each burst in under 1 ms and wait the rest. This used to
+ * be 4000 yields (~60 us) and then usleep(10) forever — on a FIFO task that
+ * is a syscall + hrtimer + context switch every ~25 us, ~40k wakeups/s, and
+ * it read as 25-30% of a core in rt_time with the emulation doing nothing.
+ * Time spent polling at FIFO 20 counts against the per-core RT budget
+ * (sched_rt_runtime_us 950000/1000000, NO_RT_RUNTIME_SHARE) exactly like
+ * work: measured 2026-09-02, cores 0/1 peaked at 933/869 ms of the 950 ms
+ * period next to Move's FIFO 70 audio workers, and when the throttle fired
+ * it parked Move's audio thread along with our stage — audible glitches in
+ * Move's own output, 60-80 ms stalls of the harness, underruns here.
+ * A 250 us poll costs ~1% and the audio ring holds ~136 ms of lead. */
 template <class Cond>
 static bool shm_wait(jp8000_shm_t *shm, Cond cond) {
-    for (int i = 0; i < 4000; i++) {
+    for (int i = 0; i < 200; i++) {
         if (cond()) return true;
         if (shm->child_shutdown) return false;
 #ifdef __aarch64__
         __asm__ volatile("yield");
 #endif
     }
+    useconds_t backoff = 10;
     while (!cond()) {
         if (shm->child_shutdown) return false;
-        usleep(10);
+        usleep(backoff);
+        backoff = backoff * 2 < 250 ? backoff * 2 : 250;
     }
     return true;
 }
@@ -469,8 +519,24 @@ struct jp8000_instance_t {
     pid_t child_pid;
     pthread_t boot_thread;
     volatile int boot_thread_running;
+    int pipeline_lock_fd;   /* see JP8000_PIPELINE_LOCK */
     dc_block_t dc[2];
 };
+
+/*
+ * ONE pipeline per device. Three stages at FIFO 20 cost 53-63% of a core
+ * each while a chord sounds, on cores 2/1/0; a second pipeline puts 120% of
+ * FIFO demand on the same cores, and because equal-priority FIFO tasks do
+ * not time-slice and the RT throttle leaves SCHED_OTHER 5% of a core, Move's
+ * UI thread, sshd and mDNS stop while the pads (FIFO 70) keep working: an
+ * LCD frozen for as long as both pipelines run. Seen twice on 2026-09-02
+ * (harness beside a loaded slot). So the emulator process takes an flock on
+ * this file for its lifetime — inherited by the stage forks, released when
+ * the last of them exits — and a second create_instance, from another slot
+ * or from plugin_drive, reports an error instead of booting.
+ */
+#define JP8000_PIPELINE_LOCK "/data/UserData/schwung/jp8000.pipeline.lock"
+
 
 /* =====================================================================
  * Child process — DSP work happens here
@@ -828,6 +894,16 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
     fprintf(stderr, "JP-8000: fork_and_wait starting...\n");
     vlog("fork_and_wait: forking child for DSP...");
 
+    inst->pipeline_lock_fd = open(JP8000_PIPELINE_LOCK, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+    if (inst->pipeline_lock_fd >= 0 && flock(inst->pipeline_lock_fd, LOCK_EX | LOCK_NB) != 0) {
+        close(inst->pipeline_lock_fd);
+        inst->pipeline_lock_fd = -1;
+        snprintf((char*)shm->load_error, sizeof(shm->load_error),
+                 "JP-8000 is already running in another slot (one per device)");
+        shm->initialized = 1; shm->loading_complete = 1;
+        return -1;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         snprintf((char*)shm->load_error, sizeof(shm->load_error),
@@ -900,6 +976,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
         return nullptr;
     }
     memset(inst->shm, 0, sizeof(jp8000_shm_t));
+    inst->pipeline_lock_fd = -1;
     strncpy((char*)inst->shm->module_dir, module_dir, sizeof(inst->shm->module_dir) - 1);
 
     fprintf(stderr, "JP-8000: creating instance from %s\n", module_dir);
@@ -930,6 +1007,8 @@ static void v2_destroy_instance(void *instance) {
         kill(inst->child_pid, SIGKILL);
         waitpid(inst->child_pid, nullptr, 0);
     }
+
+    if (inst->pipeline_lock_fd >= 0) close(inst->pipeline_lock_fd);
 
     if (inst->shm && inst->shm != MAP_FAILED)
         munmap(inst->shm, sizeof(jp8000_shm_t));
