@@ -5,10 +5,13 @@ Roland JP-8000 emulator for Schwung/Move, based on gearmulator's JE-8086 engine.
 ## Architecture
 
 Uses **fork-parallel processing** to approach real-time on Move's A72:
-- Parent process: H8S microcontroller + ASIC0+1 on core 2
-- Child process: ASIC2+3 direct loop on core 3 (no H8S needed)
-- GRAM handoff: 6×int32_t per sample via SPSC ring buffer
-- Audio output: 2×int32_t per sample via SPSC ring buffer
+- Three-stage fork pipeline: stage 0 (H8S + ASIC0) on **core 3**, stage 1 (ASIC1) on core 1, stage 2 (ASIC2+3) on core 2 (two DIFFERENT Move cores; stage 0 fits only on core 3 — RT budget, see the plugin header); per-stage GRAM handoff rings, audio out of the last stage
+- Stages run at **FIFO 20** (`child_clamp_realtime`) — SCHED_OTHER stages underrun 4 runs in 6 in the chain host with Move idle; FIFO 20 is 0 in 6. No RR and no way back from OTHER: `ableton` has RLIMIT_RTPRIO 0
+- **One pipeline per device**: an `flock` on `/data/UserData/schwung/jp8000.pipeline.lock`. Two pipelines starve everything SCHED_OTHER (Move's UI thread, sshd, mDNS) while the pads keep working — a frozen LCD, twice on 2026-09-02
+- **Core 3 is not "the SPI core"**: Move pins its whole process to cores 0–2, SPI thread included; core 3 holds only the SPI DMA IRQ thread. Stages on 2/1/0 left Move's UI thread 5% of a core during a chord; stage 0 on core 3 gives it the 40% it has with the module silent (`JE_DEFAULT_CORES`)
+- **A FIFO stage that polls is charged to the RT budget like work, and the budget is shared with Move.** Linux RT throttling here is 950 ms per core per second, no sharing; past it, EVERY RT task on that core is parked for the remainder — Move's FIFO 70 audio worker included. `shm_wait` used to `usleep(10)`-poll (~40k wakeups/s, ~30% of a core) and put cores 0/1 at 933/869 ms next to Move's workers: audible glitches in MOVE's output, none in ours. Now 200 yields then exponential back-off to 250 µs (the ring holds ~136 ms). Measure with `rt_time` in `/sys/kernel/debug/sched/debug` (root), not with top
+- **Performances select on the performance control channel (16).** Bank 80 + PC on ch 1 picks a patch. `plugin_drive` handles this for bank 80 sweeps and chords both parts (ch 1+2); in the chain host set receive=All / forward=THRU for the select. Trancer = 80/0 program 4
+- The jp8000 harness (`plugin_drive`) beside a loaded slot is refused by the lock; run it as root with `chrt -f 20` (as `ableton` it is SCHED_OTHER and underruns for that reason alone)
 
 Internal sample rate: 88,200 Hz → resampled to 44,100 Hz output.
 

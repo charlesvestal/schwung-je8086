@@ -79,6 +79,7 @@ int main(int argc, char **argv) {
         }
     }
     const bool sweep = sweep_first >= 0;
+    const bool perf = sweep && sweep_msb == 80;
 
     void *h = dlopen(so, RTLD_NOW);
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 1; }
@@ -139,18 +140,27 @@ int main(int argc, char **argv) {
         if (sweep && wb == 0) {
             const int pc = sweep_first + (int)(b / window);
             uint8_t m[3];
-            m[0] = 0xB0; m[1] = 0;  m[2] = (uint8_t)sweep_msb; api->on_midi(inst, m, 3, 0);
-            m[0] = 0xB0; m[1] = 32; m[2] = (uint8_t)sweep_lsb; api->on_midi(inst, m, 3, 0);
-            m[0] = 0xC0; m[1] = (uint8_t)pc; api->on_midi(inst, m, 2, 0);
+            /* Bank 80 is a PERFORMANCE bank, and the JP-8000 only selects a
+             * performance on its performance control channel (factory 16);
+             * on a part channel the same program change picks a patch, so a
+             * "performance sweep" on ch 1 plays one patch 64 times. */
+            const uint8_t sel_ch = perf ? 15 : 0;
+            m[0] = 0xB0 | sel_ch; m[1] = 0;  m[2] = (uint8_t)sweep_msb; api->on_midi(inst, m, 3, 0);
+            m[0] = 0xB0 | sel_ch; m[1] = 32; m[2] = (uint8_t)sweep_lsb; api->on_midi(inst, m, 3, 0);
+            m[0] = 0xC0 | sel_ch; m[1] = (uint8_t)pc; api->on_midi(inst, m, 2, 0);
             api->get_param(inst, "__status", status, sizeof(status));
             const char *u = strstr(status, "\"underruns\":");
             win_underruns = u ? atoi(u + 12) : 0;
             win_peak = 0;
         }
+        /* A performance has two parts on their own channels (Upper 1,
+         * Lower 2 at the factory settings); the chord goes to both so a
+         * layer/split renders every voice it can — the load we are after. */
+        for (int ch = 0; ch < (perf ? 2 : 1); ch++)
         for (int n = 0; n < 8; n++) {
             uint8_t m[3];
-            if (wb == per_sec / 4 + n * 6) { m[0] = 0x90; m[1] = chord[n]; m[2] = 100; api->on_midi(inst, m, 3, 0); }
-            if (wb == 6 * per_sec)         { m[0] = 0x80; m[1] = chord[n]; m[2] = 0;   api->on_midi(inst, m, 3, 0); }
+            if (wb == per_sec / 4 + n * 6) { m[0] = 0x90 | ch; m[1] = chord[n]; m[2] = 100; api->on_midi(inst, m, 3, 0); }
+            if (wb == 6 * per_sec)         { m[0] = 0x80 | ch; m[1] = chord[n]; m[2] = 0;   api->on_midi(inst, m, 3, 0); }
         }
         api->render_block(inst, buf, frames);
         fwrite(buf, sizeof(buf), 1, out);
