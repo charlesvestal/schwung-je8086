@@ -1,0 +1,135 @@
+{
+  "title": "JP-8000",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "Roland JP-8000",
+        "analog-modelling",
+        "synth emulator",
+        "(Gearmulator JE-8086).",
+        "",
+        "Home of the SuperSaw.",
+        "8-voice polyphony.",
+        "",
+        "Two modes:",
+        " Patch: one sound,",
+        "  Upper/Lower/Both",
+        " Performance: two",
+        "  parts, split or",
+        "  layer, arpeggiator"
+      ]
+    },
+    {
+      "title": "Setup",
+      "children": [
+        {
+          "title": "ROM Files",
+          "lines": [
+            "Requires the JP-8000",
+            "v1.5 firmware dump:",
+            "all 8 .mid files in",
+            "the roms/ folder.",
+            "",
+            "Upload via Schwung",
+            "Manager > Modules >",
+            "JP-8000 > Assets."
+          ]
+        },
+        {
+          "title": "Banks",
+          "lines": [
+            "Drop extra patch or",
+            "performance banks in",
+            "the banks/ folder:",
+            "",
+            " .syx .j8k .mid",
+            " .pat .pfm",
+            "",
+            "They appear beside",
+            "Factory A/B in the",
+            "Bank and Perf Bank",
+            "menus.",
+            "",
+            "Sequence-only .mid",
+            "files give no bank."
+          ]
+        },
+        {
+          "title": "CPU",
+          "lines": [
+            "The emulator runs as",
+            "three pipelined",
+            "stages on cores",
+            "0-2, kept off the",
+            "audio core.",
+            "",
+            "Only ONE JP-8000",
+            "can run at a time."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Patch Mode",
+      "lines": [
+        "Jog: browse patches",
+        "in the current bank.",
+        "Click to open the",
+        "editor.",
+        "",
+        "Knobs: Cutoff, Res,",
+        "Filter Env, Amp",
+        "A/D/S/R, Delay Level.",
+        "",
+        "Edit Part chooses",
+        "Upper, Lower or",
+        "Both. In Patch mode",
+        "one part sounds.",
+        "",
+        "Sub-pages: Osc,",
+        "Pitch, Filter, Amp,",
+        "LFO, Effects, Play,",
+        "Ribbon, Velocity."
+      ]
+    },
+    {
+      "title": "Performance Mode",
+      "lines": [
+        "Jog: browse",
+        "performances in the",
+        "current Perf Bank.",
+        "",
+        "Key Mode: Single,",
+        "Dual (layer) or",
+        "Split at Split Point.",
+        "",
+        "Sub-pages: Setup,",
+        "Upper, Lower, Arp,",
+        "Trigger.",
+        "",
+        "Upper/Lower set",
+        "each part's patch,",
+        "level, pan, channel."
+      ]
+    },
+    {
+      "title": "Presets & State",
+      "lines": [
+        "Loading a patch or",
+        "performance replays",
+        "its SysEx into the",
+        "temp area; edits go",
+        "straight to the",
+        "synth.",
+        "",
+        "The whole temp area",
+        "(both parts) is",
+        "saved with the slot",
+        "and restored on",
+        "boot, so edits",
+        "survive a restart."
+      ]
+    }
+  ]
+}
