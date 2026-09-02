@@ -5,6 +5,7 @@
     "version": "0.1.0",
     "description": "Roland JP-8000 SuperSaw emulator (Gearmulator JE-8086)",
     "author": "dsp56300/gearmulator (port: charlesvestal)",
+    "ui": "ui.js",
     "dsp": "dsp.so",
     "api_version": 2,
     "assets": {
@@ -15,9 +16,25 @@
             ".bin"
         ],
         "description": "Requires JP-8000 ROM files (.mid firmware dump). Place all 8 .mid files from the JP-8000 v1.5 firmware in the roms/ folder.",
-        "hint": "Uses fork-parallel processing (2 cores) for real-time emulation.",
+        "hint": "The emulator runs as three pipelined stages on cores 0-2, off the audio core. Only one JP-8000 can run at a time.",
         "hint_url": "https://github.com/charlesvestal/schwung-jp8000",
-        "hint_url_label": "Read more"
+        "hint_url_label": "Read more",
+        "folders": [
+            {
+                "path": "banks",
+                "label": "Banks",
+                "description": "Extra patch / performance banks (SysEx dumps, .j8k, .mid bulk dumps, .pat/.pfm), listed beside Factory A/B",
+                "extensions": [
+                    ".syx",
+                    ".j8k",
+                    ".mid",
+                    ".MID",
+                    ".pat",
+                    ".pfm"
+                ],
+                "required": false
+            }
+        ]
     },
     "capabilities": {
         "audio_out": true,
@@ -28,13 +45,18 @@
         "chainable": true,
         "component_type": "sound_generator"
     },
+    "_chain_params_note": "Fallback only. The live contract (169 params + bank enums) is served by get_param('chain_params') in dsp/jp8000_plugin.cpp, generated from tools/gen_params.py into dsp/jp8000_params.h. Keys and ranges here mirror the patch_main knobs.",
     "chain_params": [
-        {"key": "cutoff", "name": "Cutoff", "type": "int", "min": 0, "max": 127},
-        {"key": "resonance", "name": "Resonance", "type": "int", "min": 0, "max": 127},
-        {"key": "amp_attack", "name": "Amp Attack", "type": "int", "min": 0, "max": 127},
-        {"key": "amp_decay", "name": "Amp Decay", "type": "int", "min": 0, "max": 127},
-        {"key": "amp_sustain", "name": "Amp Sustain", "type": "int", "min": 0, "max": 127},
-        {"key": "amp_release", "name": "Amp Release", "type": "int", "min": 0, "max": 127},
-        {"key": "patch_volume", "name": "Volume", "type": "int", "min": 0, "max": 127}
+        {"key": "mode", "name": "Mode", "type": "enum", "options": ["Patch", "Performance"], "default": 0},
+        {"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum", "options": ["Upper", "Lower", "Both"], "default": 0},
+        {"key": "cutoff", "name": "Cutoff", "short_name": "Cut", "type": "int", "min": 0, "max": 127, "default": 127},
+        {"key": "resonance", "name": "Resonance", "short_name": "Res", "type": "int", "min": 0, "max": 127, "default": 0},
+        {"key": "filter_env_depth", "name": "Filter Env", "short_name": "Env", "type": "int", "min": -64, "max": 63, "default": 0},
+        {"key": "amp_attack", "name": "Amp Attack", "short_name": "Atk", "type": "int", "min": 0, "max": 127, "default": 0},
+        {"key": "amp_decay", "name": "Amp Decay", "short_name": "Dcy", "type": "int", "min": 0, "max": 127, "default": 64},
+        {"key": "amp_sustain", "name": "Amp Sustain", "short_name": "Sus", "type": "int", "min": 0, "max": 127, "default": 127},
+        {"key": "amp_release", "name": "Amp Release", "short_name": "Rel", "type": "int", "min": 0, "max": 127, "default": 0},
+        {"key": "delay_level", "name": "Delay Level", "short_name": "Delay", "type": "int", "min": 0, "max": 127, "default": 0},
+        {"key": "amp_level", "name": "Amp Level", "short_name": "Level", "type": "int", "min": 0, "max": 127, "default": 127}
     ]
 }
