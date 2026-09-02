@@ -44,6 +44,12 @@ struct Bank {
     std::string name;
     bool is_perf;
     std::vector<Preset> presets;
+    /* Folder this bank came from, "" for the top of banks/. LAST, so the
+     * existing brace-initialisations of {name, is_perf, presets} still hold.
+     * The browser is a hierarchy -- folder, then bank, then preset -- because a
+     * real library is nested and a flat list of 36 long paths is unreadable on
+     * 128 pixels. */
+    std::string folder;
 };
 
 enum { AREA_SYSTEM = 0x00, AREA_TEMP = 0x01, AREA_USER_PATCH = 0x02, AREA_USER_PERF = 0x03 };
@@ -322,29 +328,69 @@ static inline void scan_file(const std::string &path, const std::string &display
     if (!perfs.empty()) banks.push_back(Bank{display, true, perfs});
 }
 
+/* A bank label the user can tell apart.
+ *
+ * The extension goes, then the name is trimmed to fit -- FROM THE LEFT when a
+ * folder prefix is present, because the distinguishing part of
+ * "AZS JP-Eternal/JP-8000/Bank A" is the tail. Trimming from the right turned
+ * two different files into the identical label "AZS JP-Eternal/JP-8000/", which
+ * is worse than no prefix at all. A leading "~" marks the elision. */
 static inline std::string display_name(const std::string &file, size_t max_len) {
     std::string s = file;
     size_t dot = s.rfind('.');
     if (dot != std::string::npos && dot > 0) s = s.substr(0, dot);
-    if (s.size() > max_len) s = s.substr(0, max_len);
-    return s;
+    if (s.size() <= max_len) return s;
+    const bool nested = s.find('/') != std::string::npos;
+    if (!nested) return s.substr(0, max_len);
+    /* keep the basename whole if it fits at all */
+    const size_t slash = s.rfind('/');
+    const std::string base = s.substr(slash + 1);
+    if (base.size() + 1 >= max_len) return "~" + base.substr(base.size() - (max_len - 1));
+    return "~" + s.substr(s.size() - (max_len - 1));
 }
 
 /* Every supported file directly inside `dir`, sorted by name. */
-static inline void scan_dir(const std::string &dir, std::vector<Bank> &banks, size_t name_max = 23) {
+/* Recursive, because a real preset collection is nested: Charles's is 97 files
+ * in subdirectories (Jexus/ alone is 20 banks), and a flat scan found none of
+ * them. Subdirectory names are carried into the bank label so two files called
+ * "Bank A" in different folders stay distinguishable.
+ *
+ * `skipped` counts files that matched an extension but produced no bank. That
+ * number is the whole point of returning it: 41 of those 97 files parse to
+ * nothing, and a browser that silently lists nothing is indistinguishable from
+ * one that is broken. The caller reports it.
+ *
+ * Depth is bounded so a symlink loop cannot hang the boot scan. */
+static inline void scan_dir(const std::string &dir, std::vector<Bank> &banks, size_t name_max = 23,
+                            int *skipped = nullptr, const std::string &prefix = std::string(),
+                            int depth = 0)
+{
+    if (depth > 4) return;
     DIR *dp = opendir(dir.c_str());
     if (!dp) return;
-    std::vector<std::string> files;
+    std::vector<std::string> files, subdirs;
     while (struct dirent *de = readdir(dp)) {
         if (de->d_name[0] == '.') continue;
+        std::string name = de->d_name;
+        std::string full = dir + "/" + name;
+        struct stat st;
+        if (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) { subdirs.push_back(name); continue; }
         std::string ext = lower_ext(de->d_name);
         if (ext != "syx" && ext != "j8k" && ext != "mid" && ext != "midi" && ext != "pat" && ext != "pfm") continue;
-        files.push_back(de->d_name);
+        files.push_back(name);
     }
     closedir(dp);
     std::sort(files.begin(), files.end());
-    for (const auto &f : files)
+    std::sort(subdirs.begin(), subdirs.end());
+    for (const auto &f : files) {
+        const size_t before = banks.size();
         scan_file(dir + "/" + f, display_name(f, name_max), banks);
+        if (banks.size() == before) { if (skipped) (*skipped)++; continue; }
+        for (size_t i = before; i < banks.size(); i++) banks[i].folder = prefix;
+    }
+    for (const auto &d : subdirs)
+        scan_dir(dir + "/" + d, banks, name_max, skipped,
+                 prefix.empty() ? d : prefix + "/" + d, depth + 1);
 }
 
 } // namespace jpbank

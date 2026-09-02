@@ -8,6 +8,21 @@ set(CMAKE_C_STANDARD 11)
 # Build position-independent code (required for shared library)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# No STB_GNU_UNIQUE symbols.
+#
+# glibc marks any DSO that DEFINES a unique symbol as NODELETE at relocation
+# time, so dlclose() on it is a no-op: the chain host unloads the slot, dlopen()
+# hands back the same mapping, and the process keeps running the OLD dsp.so
+# until MoveOriginal is restarted. Gearmulator's templates gave us 254 of them,
+# which cost a whole debugging session -- ui_hierarchy kept answering with a
+# build two commits behind the file on disk, at an identical load base.
+#
+# Set before the add_subdirectory() calls: the unique symbols come from jeLib /
+# dsp56300 / synthLib linked into dsp.so, not from our own translation unit.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-gnu-unique>)
+endif()
+
 # ---- Gearmulator dependencies ----
 if(NOT GEARMULATOR_SOURCE)
     set(GEARMULATOR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/libs/gearmulator/source)
@@ -56,8 +71,18 @@ target_link_libraries(jp8000-move-plugin PRIVATE
 )
 
 # Statically link libstdc++ - the Move device may have an older GLIBCXX
+#
+# --exclude-libs,ALL hides every symbol that came out of a static archive, which
+# is the other half of -fno-gnu-unique above: libstdc++.a's locale facet `::id`
+# statics are STB_GNU_UNIQUE, and a unique symbol ANYWHERE in .dynsym is enough
+# for glibc to pin the whole DSO NODELETE, whatever our own code compiles to.
+# Hidden symbols never reach .dynsym, so they cannot be looked up as unique.
+# move_plugin_init_v2 lives in our own object file, not an archive, so it is
+# still exported.
 if(NOT APPLE)
-    target_link_options(jp8000-move-plugin PRIVATE -static-libstdc++ -static-libgcc)
+    target_link_options(jp8000-move-plugin PRIVATE
+        -static-libstdc++ -static-libgcc
+        -Wl,--exclude-libs,ALL)
 endif()
 
 # Output as dsp.so
@@ -155,6 +180,9 @@ endif()
 # ---- plugin_host_test: minimal v2 host that dlopens dsp.so for autonomous testing ----
 add_executable(plugin_host_test src/tools/plugin_host_test.cpp)
 target_link_libraries(plugin_host_test PRIVATE dl pthread)
+
+add_executable(plugin_params src/tools/plugin_params.cpp)
+target_link_libraries(plugin_params PRIVATE dl pthread)
 if(NOT APPLE)
     target_link_options(plugin_host_test PRIVATE -static-libstdc++ -static-libgcc)
 endif()

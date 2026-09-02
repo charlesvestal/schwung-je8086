@@ -1,13 +1,13 @@
 {
-  "title": "JP-8000",
+  "title": "JE-8086",
   "children": [
     {
       "title": "Overview",
       "lines": [
-        "Roland JP-8000",
+        "JE-8086",
         "analog-modelling",
         "synth emulator",
-        "(Gearmulator JE-8086).",
+        "(Gearmulator).",
         "",
         "Home of the SuperSaw.",
         "8-voice polyphony.",
@@ -33,7 +33,7 @@
             "",
             "Upload via Schwung",
             "Manager > Modules >",
-            "JP-8000 > Assets."
+            "JE-8086 > Assets."
           ]
         },
         {
@@ -64,7 +64,7 @@
             "0-2, kept off the",
             "audio core.",
             "",
-            "Only ONE JP-8000",
+            "Only ONE JE-8086",
             "can run at a time."
           ]
         }

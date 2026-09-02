@@ -61,7 +61,6 @@ mkdir -p dist/jp8000
 
 # Copy files to dist
 cat src/module.json > dist/jp8000/module.json
-cat src/ui.js > dist/jp8000/ui.js
 cat src/help.json > dist/jp8000/help.json
 cat build/dsp.so > dist/jp8000/dsp.so
 chmod +x dist/jp8000/dsp.so
