@@ -1,0 +1,40 @@
+name: Build
+
+# Builds from a CLEAN CHECKOUT on every push and PR, which is the point: the
+# gearmulator submodule was pinned to a commit that did not compile and nobody
+# noticed, because every local build passed -DGEARMULATOR_SOURCE pointing at a
+# worktree somewhere else. If this job is green, `git clone --recursive` builds.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # Only what the plugin links. A full --recursive pull drags in JUCE,
+      # RmlUi and freetype for the desktop editor -- 1.1 GB we never compile.
+      - name: Init the submodules the plugin needs
+        run: |
+          git submodule update --init libs/gearmulator
+          git -C libs/gearmulator submodule update --init source/dsp56300 source/mc68k
+          git -C libs/gearmulator/source/dsp56300 submodule update --init source/asmjit
+
+      - name: Build (cross-compiles to aarch64 in Docker)
+        run: ./scripts/build.sh
+
+      - name: Check the artifact is actually ARM64
+        run: |
+          test -f dist/jp8000-module.tar.gz
+          file dist/jp8000/dsp.so | tee /dev/stderr | grep -q 'ARM aarch64'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jp8000-module
+          path: dist/jp8000-module.tar.gz
