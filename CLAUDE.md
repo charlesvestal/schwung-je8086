@@ -105,6 +105,24 @@ previously loaded preset until the jog moved. Both complaints were one sentence
 -- the browser was displaying the synth's state where the user was reading the
 list's. `loaded_patch_name` / `loaded_performance_name` still ask the image.
 
+**A restored state is not restored until the FIRMWARE says so.** `state_apply`
+queues ~560 bytes of DT1 and writes our image optimistically; the emulator only
+parses those bytes while it STEPS, and a freshly loaded slot is silent, so the
+shim idles it and nothing drives the child. The image then reads as the restored
+performance while the previous one keeps sounding -- and switching a SET reloads
+every module, so that is the path a set switch takes. The boot thread now asks
+the firmware to dump its temp back and WAITS for it before setting `ui_ready`
+(SCHED_OTHER, nobody listening to the slot yet, so waiting is free; bounded at
+4 s so a silent firmware still yields a usable slot). Verified byte-exact:
+528/528 with the slot never rendered.
+
+**Two probes lied about this before it was found**, both worth remembering.
+`temp_refresh` forces the child to step, so using it to ask "did the restore
+land" SUPPLIES the stepping whose absence is the bug -- it passed identically
+with the fix disabled. And a spectral-similarity score on a chorused pad cannot
+separate "right patch, different LFO phase" from "wrong patch": it read 0.86 vs
+0.93 where the byte comparison read 0/528. Compare the bytes.
+
 **Arrival is tracked apart from validity.** `temp_rx_mask` / `temp_pending`
 answer "has the dump I asked for landed" without clearing `img_valid`. Clearing
 it to detect that -- the obvious way -- blanks the WHOLE UI: `param_read`

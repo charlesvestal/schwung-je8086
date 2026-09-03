@@ -78,8 +78,12 @@ int main(int argc, char **argv) {
         if (!eq) continue;
         std::string k(op, eq - op);
         api->set_param(inst, k.c_str(), eq + 1);
+        /* PROBE_IDLE=1 does NOT render while the parameter settles, which is
+         * what a slot the shim has idled looks like -- and is the difference
+         * between reproducing a set-switch restore and not. */
+        const bool idle = getenv("PROBE_IDLE") != nullptr;
         for (int i = 0; i < 300; i++) {
-            int16_t b[FRAMES * 2] = {0}; api->render_block(inst, b, FRAMES);
+            if (!idle) { int16_t b[FRAMES * 2] = {0}; api->render_block(inst, b, FRAMES); }
             struct timespec t{0, 3 * 1000000}; nanosleep(&t, nullptr);
         }
     }
