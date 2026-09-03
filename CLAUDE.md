@@ -55,6 +55,44 @@ are rejected at load; the plugin then falls back to scratch boot (~30–60 s).
 - On device, put all test artifacts in `/data/UserData/jp8000_test/`
   (NEVER /tmp — the root fs is ~474 MB and nearly full).
 
+## Loading banks
+
+**The browser serves TWO hierarchy shapes and the plugin picks.** With no
+sub-folders under `banks/` the folder level is a screen with exactly ONE row on
+it, sitting above a screen whose title differs from it by a single letter
+("Banks" over "Bank") -- and that is the shape you get from dropping files
+straight in, which is what everybody does first. `jp_ui_hierarchy_flat` drops
+the level; `bank_has_folders` from the child's scan decides. The host LATCHES
+the contract, so this must not change after load.
+
+**The browser levels carry no knobs.** They used to carry `MAIN_KNOBS`, which
+made the planner emit the Main knob page in the MIDDLE of the browse sequence:
+folder list, eight knobs, bank list, presets. The pages now run in the order the
+task does -- `BANK > PRESET > PATCH > sections`.
+
+**A repeated header block is a new preset.** Not every dump advances the
+destination slot: "The Usual Suspects" holds 32 distinctly named performances
+and addresses every one of them to user slot 0 (AZS Eternal spans 0x00-0x3F).
+Keyed by address alone they collapsed to one preset -- correct to the byte, and
+useless. `classify()` splits when a program's first block arrives twice.
+
+**`patch_count` / `performance_count` answer -1 until the table is current.**
+They used to answer out of the sizes array while the child was still filling it,
+so the previous bank's number was reported as this one's: a confident "1/1" over
+a bank of 32. The `:N` name form already had the guard; the counts beside it did
+not, so the list drew a row the name lookup then refused to fill.
+
+**A file that parses to nothing gets a row, not silence.** 39 of the 97 files in
+one real library contain no sysex at all -- ordinary MIDI songs beside the dumps
+-- so the parser is right about them and the user still needs telling. The bank
+list ends with `! N files ignored`; the name is the whole message, and the empty
+preset list under it is the honest answer. `bank_scan` audits a corpus without
+booting the emulator.
+
+**Loading a PATCH obeys Edit Part** (`load_part`): Upper, Lower or Both, so one
+sound can be taken from a bank into one half of a split. A PERFORMANCE always
+replaces both, because a performance *is* both.
+
 ## The System area
 
 A third mode, beside Patch and Performance. It is not a page under Performance:

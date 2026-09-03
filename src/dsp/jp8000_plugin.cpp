@@ -354,6 +354,10 @@ struct jp8000_shm_t {
      * indistinguishable from a broken browser -- in a real collection 41 of 97
      * files parse to nothing -- so the count is published for the UI to say. */
     int bank_files_skipped;
+    /* 1 = at least one bank came from a SUB-FOLDER of banks/. With everything
+     * dropped in at the top this is 0 and the folder level of the browser is a
+     * screen with one row on it, so the parent serves the flat hierarchy. */
+    int bank_has_folders;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     /* Folder each bank came from, "" for the top of banks/. The browser walks
      * folder -> bank -> preset. */
@@ -1048,8 +1052,32 @@ static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_ba
     uniquify(banks.patch);
     uniquify(banks.perf);
 
+    /* A file that matched an extension and produced no preset is not a
+     * failure to hide: 39 of the 97 files in one real library are ordinary
+     * MIDI songs sitting beside the dumps. Give the count a row of its own at
+     * the end of the bank list -- the bank NAME is the whole message, and the
+     * empty preset list under it is the honest answer, because there is
+     * nothing in those files to list. The child's `banks` vector does not
+     * grow, so selecting it is a bounds miss and loads nothing. */
+    auto note_skipped = [&](int *count, char (*names)[JP_BANK_NAME_LEN], int *sizes,
+                            char (*folders)[JP_BANK_NAME_LEN]) {
+        if (skipped <= 0 || *count <= 0 || *count >= JP_MAX_BANKS) return;
+        snprintf(names[*count], JP_BANK_NAME_LEN, "! %d file%s ignored", skipped,
+                 skipped == 1 ? "" : "s");
+        folders[*count][0] = '\0';
+        sizes[*count] = 0;
+        (*count)++;
+    };
+
+    bool has_folders = false;
+    for (const auto &b : banks.patch) if (!b.folder.empty()) has_folders = true;
+    for (const auto &b : banks.perf)  if (!b.folder.empty()) has_folders = true;
+    shm->bank_has_folders = has_folders ? 1 : 0;
+
     publish(banks.patch, &shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes, shm->patch_bank_folders);
     publish(banks.perf, &shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes, shm->perf_bank_folders);
+    note_skipped(&shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes, shm->patch_bank_folders);
+    note_skipped(&shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes, shm->perf_bank_folders);
     SHM_STORE_FENCE();
 }
 
@@ -2096,7 +2124,11 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * "not yet", and the UI redraws as they arrive.
      */
     if (strcmp(key, "ui_hierarchy") == 0)
-        return snprintf(buf, buf_len, "%s", jp_ui_hierarchy);
+        /* Flat unless banks/ is actually nested. Decided from the child's
+         * scan, which has finished by the time the host reads the contract --
+         * and the host latches it, so this must not change afterwards. */
+        return snprintf(buf, buf_len, "%s",
+                        inst->shm->bank_has_folders ? jp_ui_hierarchy : jp_ui_hierarchy_flat);
     if (strcmp(key, "state") == 0) return state_get(inst, buf, buf_len);
 
     /*
