@@ -129,6 +129,14 @@ if(NOT APPLE)
     target_link_options(bench_je_thread PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
+# ---- Headless embedded host ----
+add_executable(jp8000_live src/tools/jp8000_live.cpp)
+target_include_directories(jp8000_live PRIVATE ${GEARMULATOR_SOURCE})
+target_link_libraries(jp8000_live PRIVATE jeLib synthLib baseLib)
+if(NOT APPLE)
+    target_link_options(jp8000_live PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
 # ---- Snapshot tool ----
 
 add_executable(je_snapshot src/tools/je_snapshot.cpp)
