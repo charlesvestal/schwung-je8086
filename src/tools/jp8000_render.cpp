@@ -292,6 +292,37 @@ int main(int argc, char **argv) {
 #endif
 
     std::vector<synthLib::SMidiEvent> midiIn, midiOut;
+    /* JE_RAWDUMP=path: raw ASIC3 stereo pairs at the true emission point, the
+     * same format in serial and pipeline modes. Compares the ENGINE output
+     * without Device/JeThread buffering in the way. */
+    static FILE* rawDump = nullptr;
+    if (const char* rd = getenv("JE_RAWDUMP")) {
+        rawDump = fopen(rd, "wb");
+        if (rawDump) {
+            jeLib::devices::g_je_audio_tap = [](int32_t l, int32_t r) {
+                int32_t pair[2] = { l, r };
+                fwrite(pair, sizeof(pair), 1, rawDump);
+            };
+            atexit([] { if (rawDump) { fclose(rawDump); rawDump = nullptr; } });
+        }
+    }
+
+    /* JE_PIPELINE="1,2,3" runs the parallel ASIC pipeline (see jePipeline.h),
+     * JE_PIPELINE_CORES="0,1,2,3" pins it. Unset = serial, unchanged. */
+    if (const char* pb = getenv("JE_PIPELINE")) {
+        auto parseList = [](const char* s) {
+            std::vector<int> v; int n = 0;
+            while (*s) { if (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); if (!s[1] || s[1] == ',') { v.push_back(n); n = 0; } } ++s; }
+            return v;
+        };
+        const auto bounds = parseList(pb);
+        const auto cores = getenv("JE_PIPELINE_CORES") ? parseList(getenv("JE_PIPELINE_CORES")) : std::vector<int>();
+        const int64_t window = getenv("JE_PIPELINE_WINDOW") ? atoll(getenv("JE_PIPELINE_WINDOW")) : 64;
+        device.getJe8086().requestParallelPipeline(bounds, cores, window);
+        fprintf(stderr, "[render] parallel pipeline requested: bounds=%s cores=%s\n",
+                pb, getenv("JE_PIPELINE_CORES") ? getenv("JE_PIPELINE_CORES") : "(none)");
+    }
+
     SysexRemoteControl sysexRemote;
     bool bootFinished = snap;
     /* JP_LCD_LOG=1 prints every LCD change with its render time.  The LCD is
