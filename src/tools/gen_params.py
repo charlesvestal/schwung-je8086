@@ -242,14 +242,33 @@ for idx, key, name, short in COMMON:
 # are skipped. Ranges from jemiditypes.h SystemParameter and verified writable
 # by read-back (sysreq/sysparam in jp8000_render).
 SYSTEM = [
-    # The seventh field is the DEFAULT, and it is what the panel reads after our
-    # boot force, not the factory value -- measured by writing each value and
-    # reading the firmware's own system dump back. Every max below was found the
-    # same way: the firmware silently REJECTS an out-of-range write and keeps
-    # what it had, so an accepted write is the only proof of a range.
+    # Twelve of the keyboard's system parameters. The pattern/motion sequencer
+    # block and the rack-only tail are skipped; so is Power-Up Mode, which is
+    # the one entry a module CANNOT honour -- the child boots from a snapshot
+    # and we then apply the slot's own state, so what the firmware would have
+    # loaded at power-on is overwritten before anyone can hear it.
+    #
+    # Several of the rest do nothing MEASURABLE through a Schwung slot today:
+    # Keyboard Shift transposes the physical keyboard (a note on the remote
+    # channel is identical at -2, 0 and +2), Local disconnects an internal
+    # keyboard we do not have, and the ribbon is a panel fader
+    # (kFader_Ribbon1/2) that nothing here can move -- jemiditypes.h marks
+    # those three "(keyboard only)". They stay anyway: they are per-set,
+    # per-preset state that rides in the "sys" blob, and a setting that is
+    # latent is not a setting that is wrong. Gate Time Ratio is listed for the
+    # same reason and with less certainty still -- the render that appeared to
+    # show it inert never established the arpeggiator was running, so it
+    # measured nothing.
+    #
+    # The seventh field is the DEFAULT, and it is what the panel reads after
+    # our boot force, not the factory value. Every max below WAS measured: the
+    # firmware silently REJECTS an out-of-range write and keeps what it had,
+    # so an accepted write is the only proof of a range. The probe was checked
+    # against a positive control first -- Master Tune moves the same note
+    # 170 / 174 / 180 Hz -- because a probe that measures the wrong thing
+    # reports "no change" just as confidently as a real result.
     (0x02, "sys_perf_ctrl_ch", "Perf Ctrl Ch", "PerfCh", "enum",
      [str(i) for i in range(1, 17)] + ["Off"], 16),
-    (0x03, "sys_powerup_mode", "Power-Up Mode", "Boot", "enum", ["Perform P:11", "Last Set"], 0),
     (0x04, "sys_midi_sync", "MIDI Sync", "Sync", "enum", ["Off", "On"], 1),
     (0x05, "sys_local", "Local", "Local", "enum", ["Off", "On"], 1),
     (0x06, "sys_txrx_edit_mode", "TxRx Edit Mode", "EdMode", "enum", ["Mode 1", "Mode 2"], 1),
@@ -439,7 +458,7 @@ PERF_LEVELS = [
 # dive down, grouped the way the manual groups them.
 SYS_LEVELS = [
     ("sys_txrx", "TxRx", K("sys_txrx_edit", "sys_txrx_edit_mode", "sys_txrx_pc")),
-    ("sys_kbd", "Keyboard", K("sys_master_tune", "sys_kbd_shift", "sys_gate_ratio", "sys_powerup_mode")),
+    ("sys_kbd", "Keyboard", K("sys_master_tune", "sys_kbd_shift", "sys_gate_ratio")),
     ("sys_ribbon", "Ribbon", K("sys_ribbon_rel", "sys_ribbon_hold")),
 ]
 SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_local", "sys_midi_sync")
@@ -611,7 +630,6 @@ SHORT_OPT = {
     "amp_lfo1_mode": {"MANUAL": "MAN", "LFO1": "LFO1", "ENV": "ENV"},
     # System. The generic 6-char truncation turned these into "Per"/"Las" and
     # "Ban" -- three words that name nothing.
-    "sys_powerup_mode": {"Perform P:11": "P11", "Last Set": "LAST"},
     "sys_txrx_pc": {"Off": "OFF", "PC": "PC", "Bank Sel + PC": "BNK PC"},
     "sys_txrx_edit_mode": {"Mode 1": "MOD 1", "Mode 2": "MOD 2"},
     "sys_gate_ratio": {"Staccato": "STAC", "Real": "REAL"},
