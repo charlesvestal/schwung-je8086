@@ -1105,8 +1105,8 @@ static void child_serve_names(jp8000_shm_t *shm, const child_banks_t &banks) {
 /* Replay a preset into the temp area (JUCE Controller::sendSingle): each
  * DT1 re-addressed from its user slot to the temp block, then a temp
  * request so the images follow. */
-static void child_serve_load(jp8000_shm_t *shm, const child_banks_t &banks, jeLib::Je8086 &je) {
-    if (shm->load_seq == shm->load_done) return;
+static bool child_serve_load(jp8000_shm_t *shm, const child_banks_t &banks, jeLib::Je8086 &je) {
+    if (shm->load_seq == shm->load_done) return false;
     SHM_LOAD_FENCE();
     const int kind = shm->load_kind, b = shm->load_bank, i = shm->load_index, part = shm->load_part;
     const std::vector<jpbank::Bank> &list = kind ? banks.perf : banks.patch;
@@ -1131,9 +1131,17 @@ static void child_serve_load(jp8000_shm_t *shm, const child_banks_t &banks, jeLi
                 }
             }
         }
+        /* Invalidate before asking. The image is the ANSWER to this request,
+         * so leaving the old bits set means the loop below cannot tell "the
+         * new patch has arrived" from "the previous one is still there" --
+         * and the parent would keep serving the old name as if it were the
+         * new one. */
+        shm->img_valid &= ~(uint32_t)IMG_ALL_TEMP;
+        SHM_STORE_FENCE();
         child_request_temp(je);
     }
     shm->load_done = shm->load_seq;
+    return true;
 }
 
 /* Also try: send MIDI note directly via Serial for immediate testing.
@@ -1429,19 +1437,81 @@ static void child_main(jp8000_shm_t *shm) {
 
     /* Main DSP loop */
     uint32_t loop_iter = 0;
+    /* WALL CLOCK, not a step count.
+     *
+     * A step budget assumes the child runs at a known rate and it does not:
+     * unthrottled on a dev host it managed ~4k steps/s where the device does
+     * ~88k, so a bound that is generous on one is 20x short on the other. The
+     * temp dump needs on the order of 200k steps -- ~530 bytes at 31250 baud
+     * plus the firmware's own pace -- which is a couple of seconds of REAL
+     * time wherever it runs. It is a ceiling, not a duration: the wait ends
+     * the moment the image is whole. JP_AWAIT_TEMP_MS overrides it for tests
+     * on a host too slow to hit the real figure. */
+    const char *await_env = getenv("JP_AWAIT_TEMP_MS");
+    const uint64_t AWAIT_TEMP_US = (uint64_t)(await_env ? atoi(await_env) : 3000) * 1000ull;
+    uint64_t awaiting_until = 0;
+    auto now_us = []() -> uint64_t {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+    };
     while (!shm->child_shutdown) {
-        if (audio_ring_available(shm) >= AUDIO_RING_THROTTLE) {
+        /* Name lookups are a copy out of the child's own parsed banks and need
+         * no emulator step at all, so they are served whatever the ring is
+         * doing. Cheap when idle: it returns on a comparison unless the parent
+         * asked for a bank it has not been given. */
+        child_serve_names(shm, banks);
+
+        /* THE THROTTLE MUST NOT SWALLOW UI WORK.
+         *
+         * The sleep below used to be the first thing in the loop, so a full
+         * audio ring stopped `je->step()` AND every service under it. That is
+         * fine while something is consuming the audio -- and nothing is, once
+         * the shim idles the slot, which it now does because the DC blocker
+         * made this module genuinely silent at rest. The emulator froze, and
+         * with it the preset browser: a name arrived only when a note woke the
+         * slot up, and a preset LOAD sat in the sysex ring unprocessed, which
+         * is why loading a performance did not replace both parts.
+         *
+         * Anything the FIRMWARE has to run for keeps the loop stepping even
+         * with a full ring. Dropping the audio that produces is already
+         * handled -- setPostSample returns when `audio_ring_free() < 1` -- and
+         * there are 2192 samples of headroom above the throttle before that
+         * happens, which is more than a load needs. */
+        /* Injecting the DT1s is not the end of a load: the firmware has to
+         * CONSUME them, and it only does that when the emulator steps. Serving
+         * the request and going straight back to sleep is what left a loaded
+         * performance sounding like the one before it -- the bytes were
+         * delivered and never read. Step until the temp image the load asked
+         * for comes back, bounded so a firmware that never answers cannot pin
+         * an idle slot awake forever. */
+        /* Armed by the SERVE, not by the request.
+         *
+         * Arming it here on `load_seq != load_done` looked equivalent and was
+         * not: the image is still whole from the previous load at that point,
+         * so the completion check below cleared the countdown on the very same
+         * iteration, and by the time child_serve_load invalidated the image the
+         * arming condition was already false. Nothing re-armed it, the child
+         * went back to sleep, and the load was never consumed -- the exact
+         * symptom this was meant to fix, reintroduced one line further up. */
+        if (awaiting_until && ((shm->img_valid & IMG_ALL_TEMP) == IMG_ALL_TEMP
+                               || now_us() >= awaiting_until))
+            awaiting_until = 0;
+
+        const bool ui_pending = (shm->load_seq != shm->load_done)
+                              || awaiting_until != 0
+                              || sx_ring_available(shm) > 0
+                              || midi_fifo_available(shm) > 0;
+
+        if (!ui_pending && audio_ring_available(shm) >= AUDIO_RING_THROTTLE) {
             usleep(1000);
             continue;
         }
 
         if (child_process_midi(shm, *je)) child_request_temp(*je);
         child_pump_sysex_ring(shm, *je);
-        /* UI services, off the per-step path: a name table is a few KB of
-         * snprintf and a load is a few hundred bytes of DT1. */
+        /* Off the per-step path: a load is a few hundred bytes of DT1. */
         if ((++loop_iter & 63) == 0) {
-            child_serve_names(shm, banks);
-            child_serve_load(shm, banks, *je);
+            if (child_serve_load(shm, banks, *je)) awaiting_until = now_us() + AWAIT_TEMP_US;
             child_drain_midi_out(shm, *je, midi_scratch);
         }
 
