@@ -49,6 +49,27 @@ PIPELINE spreading ASICs across cores, not from the H8S/ESP work. Keep the two
 claims apart: "~1.8x faster on A72, bit-exact" is the upstream claim; "real-time
 on Move" is a product claim that depends on machinery upstream is not getting.
 
+**The pipeline is what reaches real-time, and it does so on stock hardware.**
+Same Pi 4B @ 1.8 GHz, stock Debian 13, no Move-specific anything:
+
+| Configuration | RT factor |
+|---------------|-----------|
+| Serial, optimized (`bench_je`) | 0.85x |
+| Fork pipeline, 2 stages on 2 cores (`bench_je_fork`) | 2.01x |
+
+Scaled to Move's 1.5 GHz CM4 that is ~1.67x, and sharing cores with Ableton's
+UI process brings it to about the ~1.4x observed in play -- so the real-time
+claim is a PIPELINE claim, corroborated, and nothing to do with the retracted
+2026-06 figure it happens to match numerically.
+
+The split is uneven: stage 0 (H8S + ASIC0..1) runs 5.63 us/sample against stage
+1's 4.26, and stage 1 idle-waits 1.21 s of a 10 s render. Budget is 11.34
+us/sample. A better-balanced split has headroom.
+
+(`bench_je` and `jp8000_render` are different workloads -- the renderer also
+resamples and writes a wav -- so their serial figures, 0.85x and 0.68-0.75x,
+are not directly comparable to each other. Compare each against itself.)
+
 **Do not benchmark this on a dev Mac.** Apple Silicon renders the optimizations
 invisible -- 6.92x vs 6.93x serial, before vs after -- because a wide
 out-of-order core hides the per-instruction timer loop, the pointer-table
