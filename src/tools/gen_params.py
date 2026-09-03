@@ -260,9 +260,24 @@ SYSTEM = [
     # The ribbon pair is NOT in that category and stays. `Faders` is fully
     # emulated, `setFader(which, value)` exists, and kFader_Ribbon1/2 sit in
     # its table beside pitch bend and the mod wheel -- nothing calls it yet,
-    # which makes the ribbon latent rather than impossible. Gate Time Ratio
-    # stays on weaker grounds still: the render that appeared to show it inert
-    # never established the arpeggiator was running, so it measured nothing.
+    # which makes the ribbon latent rather than impossible.
+    #
+    # Gate Time Ratio is the same shape, and it took two attempts to say so
+    # honestly. It belongs to the pattern/RPS block, not the arpeggiator:
+    # measured against a VERIFIED-RUNNING arpeggiator (mode UP, beat NORMAL
+    # 1/16, 11 voice starts at 0.405s), all six of its values render
+    # BYTE-IDENTICAL audio. The first attempt at this used a sustained pad and
+    # never established the arp was running at all, so it proved nothing and
+    # was reported as if it had.
+    #
+    # What it would act on is RPS, and RPS is selectable but SILENT: arp_mode
+    # = RPS gives zero voice starts on every pattern family, across the whole
+    # keyboard, with and without a running clock -- while the identical script
+    # in mode UP arpeggiates. RPS plays back RECORDED phrases, and PatternSetup
+    # (SystemArea 0x1000) holds only 48 loop lengths, not phrase data; the
+    # phrases are recorded with the panel REC and the keyboard, and the key
+    # matrix is a stub. So it stays for the same reason the ribbon does.
+    #
     # Being unable to observe a parameter is not the same as knowing it does
     # nothing; a stub device IS knowing.
     #
