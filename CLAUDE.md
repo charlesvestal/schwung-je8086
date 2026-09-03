@@ -293,6 +293,18 @@ UNSTABLE, excluding it -- otherwise the harness's own jitter gets read as a
 regression from the change under test. That happened: `performance_select` was
 reported as DIFFERS before the self-check existed.
 
+**A parallel pipeline is exact and reproducible only if its delay is FIXED.**
+Bounding how far the H8S may lead the stages is not enough: how far it actually
+gets still depends on thread timing, so each run covers a different span of
+emulated time. Three runs of the threaded pipeline at window 4 gave three
+different hashes. Delivering audio on a constant delay instead -- one sample
+handed over for every sample rendered, taken a fixed number of samples late --
+ties the output to counters rather than to timing. Measured on a Pi 4B: the raw
+ASIC3 tap is then byte-identical to serial and identical across runs, the wav is
+the serial stream shifted by that fixed delay, and it still runs at 1.27x
+against serial's 0.64x. Two samples of delay is enough; it only has to cover the
+samples in flight.
+
 **The parallel pipeline is very likely why.** The stages let the H8S run ahead of
 the audio, and HOW FAR it gets before the stages catch up depends on thread
 timing, so the emulator covers a slightly different span of emulated time each
