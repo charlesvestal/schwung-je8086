@@ -85,7 +85,12 @@ static void do_get(plugin_api_v2_t *api, void *inst, const char *key) {
     if (n < 0) { printf("  %-20s = <unavailable>\n", key); return; }
     buf[n < (int)BUFSZ ? n : (int)BUFSZ - 1] = '\0';
     if (getenv("JP_FULL")) { printf("%s\n", buf); return; }
-    if (n > 200) printf("  %-20s = (%d bytes) %.200s...\n", key, n, buf);
+    /* PLUGIN_PARAMS_FULL=1 prints the whole value. A state blob is ~1.2 KB and
+     * the interesting part is at the END, so the 200-char preview hid exactly
+     * what a round-trip check needs to see. */
+    if (n > 200 && !getenv("PLUGIN_PARAMS_FULL"))
+        printf("  %-20s = (%d bytes) %.200s...\n", key, n, buf);
+    else if (n > 200) printf("  %-20s = %s\n", key, buf);
     else printf("  %-20s = %s\n", key, buf);
 }
 

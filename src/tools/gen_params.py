@@ -165,7 +165,7 @@ def type_of(p):
     return dict(type="enum", options=opts, off=lo)
 
 # ---- collect ----------------------------------------------------------------
-AREA_PATCH, AREA_PART_UP, AREA_PART_LO, AREA_COMMON = 0, 1, 2, 3
+AREA_PATCH, AREA_PART_UP, AREA_PART_LO, AREA_COMMON, AREA_SYSTEM = 0, 1, 2, 3, 4
 params = []          # dicts: key,name,short,area,lin,bit14,type,min,max,off,options,default
 seen_patch = set()
 
@@ -226,6 +226,58 @@ for idx, key, name, short in COMMON:
     if key == "arp_beat":
         d["options"] = d["options"][:90]
         d.update(min=0, max=len(d["options"]) - 1)
+
+
+# ---- System area -------------------------------------------------------------
+# Reached on the hardware with SHIFT/EXIT ("Performance parameters or System
+# parameters", manual p.85) -- a mode you enter, not a page under Performance.
+#
+# These live at address area 0x00000000, outside the temp performance, so they
+# are the one group whose writes do not carry the TEMP base. The image was
+# already being filled from DT1 replies (img_system, IMG_SYSTEM); nothing could
+# address it until now.
+#
+# Only the keyboard's parameters, and only the ones that mean something through
+# a Schwung slot: the pattern/motion sequencer settings and the rack-only tail
+# are skipped. Ranges from jemiditypes.h SystemParameter and verified writable
+# by read-back (sysreq/sysparam in jp8000_render).
+SYSTEM = [
+    # The seventh field is the DEFAULT, and it is what the panel reads after our
+    # boot force, not the factory value -- measured by writing each value and
+    # reading the firmware's own system dump back. Every max below was found the
+    # same way: the firmware silently REJECTS an out-of-range write and keeps
+    # what it had, so an accepted write is the only proof of a range.
+    (0x02, "sys_perf_ctrl_ch", "Perf Ctrl Ch", "PerfCh", "enum",
+     [str(i) for i in range(1, 17)] + ["Off"], 16),
+    (0x03, "sys_powerup_mode", "Power-Up Mode", "Boot", "enum", ["Perform P:11", "Last Set"], 0),
+    (0x04, "sys_midi_sync", "MIDI Sync", "Sync", "enum", ["Off", "On"], 1),
+    (0x05, "sys_local", "Local", "Local", "enum", ["Off", "On"], 1),
+    (0x06, "sys_txrx_edit_mode", "TxRx Edit Mode", "EdMode", "enum", ["Mode 1", "Mode 2"], 1),
+    (0x07, "sys_txrx_edit", "TxRx Edit", "Edit", "enum", ["Off", "On"], 1),
+    (0x08, "sys_txrx_pc", "TxRx Prog Change", "PC", "enum", ["Off", "PC", "Bank Sel + PC"], 2),
+    # We force this to 3 at boot -- it is the only note path that feeds the
+    # arpeggiator, and the firmware default (Off) is why the arp never ran.
+    (0x09, "sys_remote_ch", "Remote Ctrl Ch", "RemCh", "enum",
+     [str(i) for i in range(1, 17)] + ["All", "Off"], 2),
+    # parameterDescriptions_je.json page 5 index 10: 0..100, 50 = A440.
+    (0x0a, "sys_master_tune", "Master Tune", "Tune", "int", (0, 100), 50),
+    (0x0e, "sys_gate_ratio", "Gate Time Ratio", "Gate", "enum",
+     ["Real", "Staccato", "33%", "50%", "66%", "100%"], 0),
+    (0x14, "sys_kbd_shift", "Keyboard Shift", "Shift", "enum",
+     ["-2", "-1", "0", "+1", "+2"], 2),
+    (0x15, "sys_ribbon_rel", "Ribbon Relative", "RibRel", "enum", ["Off", "On"], 0),
+    (0x16, "sys_ribbon_hold", "Ribbon Hold", "RibHld", "enum", ["Off", "On"], 0),
+]
+for _e in SYSTEM:
+    idx, key, name, short, typ, spec = _e[:6]
+    dflt = _e[6] if len(_e) > 6 else 0
+    d = dict(key=key, name=name, short=short, area=AREA_SYSTEM, lin=idx, bit14=False,
+             default=dflt, type=typ, off=0)
+    if typ == "enum":
+        d["options"] = spec; d["min"] = 0; d["max"] = len(spec) - 1
+    else:
+        d["min"], d["max"] = spec
+    params.append(d)
 
 assert len(params) < 230, len(params)
 byKey = {p["key"]: p for p in params}
@@ -379,7 +431,20 @@ PERF_LEVELS = [
     ("perf_arp", "Arpeggiator", K("arp_switch", "arp_mode", "arp_beat", "arp_range", "arp_hold", "arp_dest")),
     ("perf_trigger", "Ind. Trigger", K("trigger_switch", "trigger_dest", "trigger_ch", "trigger_note")),
 ]
-covered = set(k for _, _, ks in PATCH_LEVELS + PERF_LEVELS for k in ks)
+# System is a MODE, not a page under Performance: on the hardware you leave the
+# performance to reach it (SHIFT/EXIT, manual p.85) and what you set there
+# outlives the patch you were editing. Four MIDI entries earn the root because
+# they are the ones a Schwung slot actually has to get right -- Remote Ctrl Ch
+# is what makes the arpeggiator hear anything at all -- and the rest sit one
+# dive down, grouped the way the manual groups them.
+SYS_LEVELS = [
+    ("sys_txrx", "TxRx", K("sys_txrx_edit", "sys_txrx_edit_mode", "sys_txrx_pc")),
+    ("sys_kbd", "Keyboard", K("sys_master_tune", "sys_kbd_shift", "sys_gate_ratio", "sys_powerup_mode")),
+    ("sys_ribbon", "Ribbon", K("sys_ribbon_rel", "sys_ribbon_hold")),
+]
+SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_local", "sys_midi_sync")
+
+covered = set(k for _, _, ks in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS for k in ks) | set(SYS_MAIN)
 # panel_select has no page of its own on purpose: "Edit Part" writes it, and a
 # second row for the same switch could disagree with the first.
 UNPAGED = {"panel_select"}
@@ -454,7 +519,9 @@ levels = {
 levels["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
                                   "short_name": LEVEL_SHORT.get("perf_main", {}).get(k) or byKey[k]["short"]}
                                  for k in levels["perf_main"]["knobs"]] + levels["perf_main"]["params"]
-for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS:
+levels["system"] = level("System", SYS_MAIN, lid="system",
+                         extra=[{"level": lid, "label": lab} for lid, lab, _ in SYS_LEVELS])
+for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS:
     levels[lid] = level(lab, keys, lid=lid)
 
 # A page that shows one word twice is ambiguous, and the contract cannot see it
@@ -472,7 +539,7 @@ for _lid, _lvl in levels.items():
     if _d: _dupes[_lid] = _d
 assert not _dupes, "duplicate cell labels on a page: %s" % _dupes
 
-hierarchy = {"modes": ["patch", "performance"], "mode_param": "mode", "levels": levels}
+hierarchy = {"modes": ["patch", "performance", "system"], "mode_param": "mode", "levels": levels}
 
 
 # panel_select is addressable but must not get its own chain_params row: the
@@ -542,6 +609,12 @@ SHORT_OPT = {
                    "MONO SHORT": "MON SHT", "MONO LONG": "MON LNG"},
     "key_mode": {"SINGLE": "SGL", "DUAL": "DUL", "SPLIT": "SPL"},
     "amp_lfo1_mode": {"MANUAL": "MAN", "LFO1": "LFO1", "ENV": "ENV"},
+    # System. The generic 6-char truncation turned these into "Per"/"Las" and
+    # "Ban" -- three words that name nothing.
+    "sys_powerup_mode": {"Perform P:11": "P11", "Last Set": "LAST"},
+    "sys_txrx_pc": {"Off": "OFF", "PC": "PC", "Bank Sel + PC": "BNK PC"},
+    "sys_txrx_edit_mode": {"Mode 1": "MOD 1", "Mode 2": "MOD 2"},
+    "sys_gate_ratio": {"Staccato": "STAC", "Real": "REAL"},
 }
 
 def _short_sync(o):
@@ -581,7 +654,7 @@ def short_options_for(key, opts):
     return out if any(a != b for a, b in zip(out, opts)) else None
 
 cp = []
-cp.append({"key": "mode", "name": "Mode", "type": "mode", "options": ["Patch", "Performance"]})
+cp.append({"key": "mode", "name": "Mode", "type": "mode", "options": ["Patch", "Performance", "System"]})
 cp.append({"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum",
            "options": ["Upper", "Lower", "Both"],
            # declared here rather than through the params loop, so it needs its own
@@ -637,7 +710,7 @@ enum_tables = []
 lines = []
 lines.append("/* GENERATED by src/tools/gen_params.py from gearmulator's parameterDescriptions_je.json. DO NOT EDIT. */")
 lines.append("#pragma once\n#include <stdint.h>\n")
-lines.append("enum { JP_AREA_PATCH = 0, JP_AREA_PART_UP = 1, JP_AREA_PART_LO = 2, JP_AREA_COMMON = 3 };\n")
+lines.append("enum { JP_AREA_PATCH = 0, JP_AREA_PART_UP = 1, JP_AREA_PART_LO = 2, JP_AREA_COMMON = 3, JP_AREA_SYSTEM = 4 };\n")
 lines.append("typedef struct {\n    const char *key;\n    uint8_t area;      /* JP_AREA_* */\n"
              "    uint8_t lin;       /* linear byte offset inside the area (MSB byte for 14-bit) */\n"
              "    uint8_t bit14;\n    int16_t vmin, vmax; /* displayed range */\n"
