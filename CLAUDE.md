@@ -27,6 +27,21 @@ audio (2:1 decimation), so decimation does NOT halve the work — an earlier
 | Serial (H8S + 4 ASICs, 1 core) | 0.37x | 0.30–0.33x after ARM64 JIT revert |
 | Fork parallel (2+2 ASICs, 2 cores) | 0.72x | ~0.58x after ARM64 JIT revert |
 
+**STALE — these figures predate the 2026-09-02 optimizations** (timer event
+horizon, H8S page-mapped accesses, ESP per-core dirty + Assembler, dense ARM64
+emitter). They have not been re-measured on device since, and the module is
+reported to play without dropouts, i.e. above real-time. Re-measure with
+`bench_je` (serial, the number relevant to upstream) and `bench_je_fork` before
+quoting anything here.
+
+Measuring on a dev Mac is useless for this: Apple Silicon renders the
+optimizations invisible (6.92x vs 6.93x serial, REF vs optimized), because a
+wide out-of-order core hides the per-instruction timer loop, the pointer-table
+indirection and the extra ESP loads/stores that an A72 actually pays for. Use
+A72 hardware; a bare Pi 4 isolates it from Move's core pinning and RT budget.
+
+**The paragraph below is the pre-optimization state, kept for history.**
+
 **The full emulator is below real-time on Move.** Audio works end-to-end
 (boot, snapshot, MIDI, notes) but the ring underruns continuously →
 dropouts. Cost is the same idle vs. playing: the ASICs always run their
