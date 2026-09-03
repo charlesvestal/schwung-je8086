@@ -49,6 +49,26 @@ PIPELINE spreading ASICs across cores, not from the H8S/ESP work. Keep the two
 claims apart: "~1.8x faster on A72, bit-exact" is the upstream claim; "real-time
 on Move" is a product claim that depends on machinery upstream is not getting.
 
+**Definitive numbers, Pi 4B @ 1.8 GHz, measured 2026-09-03 after a reboot with
+`throttled=0x0` before and after** (48.7 -> 66.7 C, well under the 80 C cap):
+
+| Configuration | engine (`bench_je*`) | via Device (`jp8000_render`) |
+|---------------|----------------------|------------------------------|
+| serial | 0.85x | 0.60x |
+| pipeline, 2 stages | 2.06x fork / 2.01x thread | |
+| pipeline, 3 stages | 2.58x fork / 2.62x thread | |
+| pipeline, 4 stages | 2.94x fork / 2.92x thread | 1.28x |
+
+Threads match fork at every depth. The Device column is lower for a reason
+worth knowing: **every sample crosses JeThread's semaphore ring**
+(`RingBuffer<SampleFrame,16384,true>`, Lock=true -> SpscSemaphoreWithCount)
+once on each side, and the producing side sits on the parent stage thread where
+the pipeline cannot remove it. The bench's parent stage costs 3.76 us/sample and
+Device adds ~4.7 us/sample of per-sample ring and bookkeeping, so 11.34/8.5
+predicts 1.33x against 1.28x measured. Batching that handoff is the next real
+win and would lift the serial number too -- on every platform, including the
+desktops where the pipeline itself is pointless.
+
 **The pipeline is what reaches real-time, and it does so on stock hardware.**
 Same Pi 4B @ 1.8 GHz, stock Debian 13, no Move-specific anything:
 
