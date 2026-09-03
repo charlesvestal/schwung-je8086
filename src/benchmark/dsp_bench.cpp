@@ -712,6 +712,21 @@ int main(int argc, char* argv[]) {
     }
     if (argc > 2) g_dump = fopen(argv[2], "wb");
 
+    /* JE_RAWDUMP=path: the raw ASIC3 stereo pair, identical format in serial,
+     * fork and threaded modes, so the three can be hashed against each other.
+     * Only the ASIC3 owner writes it, so there is a single writer even in fork. */
+    static FILE* rawDump = nullptr;
+    if (const char* rd = getenv("JE_RAWDUMP")) {
+        rawDump = fopen(rd, "wb");
+        if (rawDump) {
+            jeLib::devices::g_je_audio_tap = [](int32_t l, int32_t r) {
+                int32_t pair[2] = { l, r };
+                fwrite(pair, sizeof(pair), 1, rawDump);
+            };
+            atexit([] { if (rawDump) { fclose(rawDump); rawDump = nullptr; } });
+        }
+    }
+
 #ifdef __linux__
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
