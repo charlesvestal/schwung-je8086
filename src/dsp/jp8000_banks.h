@@ -183,10 +183,23 @@ static inline std::string name_from(const Msg *offset0) {
  * at linear 242) would land past the temp patch and is dropped. */
 static const uint32_t PATCH_LINEAR_LEN = 239;
 
-/* Group by (area, program) in order of first appearance. */
+/* Group by (area, program) in order of first appearance -- and START A NEW
+ * GROUP when a program's FIRST BLOCK arrives a second time.
+ *
+ * That second rule is what makes a librarian out of a literal reader. Not
+ * every dump advances the destination slot: "The Usual Suspects" holds 32
+ * distinctly named performances and addresses EVERY ONE of them to user slot
+ * 0 (AZS Eternal, by contrast, spans slots 0x00-0x3F). Sent to real hardware
+ * that file leaves you with only the last one. Keyed by address alone it
+ * collapsed to a single preset -- correct to the byte, and useless: the
+ * browser showed "1/1" for a bank of 32.
+ *
+ * A repeat of the header block means "here comes another one", so that is
+ * where the split goes. Files that do advance the slot are unaffected: their
+ * header arrives once per key. */
 static inline void classify(const std::vector<Msg> &msgs, std::vector<Preset> &patches,
                             std::vector<Preset> &perfs) {
-    struct Group { Preset p; const Msg *offset0; bool is_perf; };
+    struct Group { Preset p; const Msg *offset0; bool is_perf; bool has_hdr; };
     std::vector<Group> groups;
     std::map<uint64_t, size_t> index;
     for (const Msg &m : msgs) {
@@ -215,10 +228,16 @@ static inline void classify(const std::vector<Msg> &msgs, std::vector<Preset> &p
         auto it = index.find(key);
         if (it == index.end()) {
             index[key] = groups.size();
-            groups.push_back(Group{Preset(), nullptr, is_perf});
+            groups.push_back(Group{Preset(), nullptr, is_perf, false});
             it = index.find(key);
+        } else if (local == 0 && groups[it->second].has_hdr) {
+            /* Second header for the same destination: a new preset, not a
+             * continuation of the one before it. */
+            it->second = groups.size();
+            groups.push_back(Group{Preset(), nullptr, is_perf, false});
         }
         Group &g = groups[it->second];
+        if (local == 0) g.has_hdr = true;
         /* A whole-patch message that runs past the keyboard's 239 bytes
          * (JP-8080 dumps are 240/242) is cut at the boundary, not dropped. */
         uint32_t lin = packed_to_linear(local);

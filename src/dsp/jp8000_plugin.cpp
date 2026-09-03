@@ -2209,10 +2209,22 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         }
         if (strcmp(key, "banks_skipped") == 0)
             return snprintf(buf, buf_len, "%d", shm->bank_files_skipped);
-        if (strcmp(key, "patch_count") == 0)
-            return snprintf(buf, buf_len, "%d", shm->patch_bank_count > 0 ? shm->patch_bank_sizes[inst->bank] : 0);
-        if (strcmp(key, "performance_count") == 0)
-            return snprintf(buf, buf_len, "%d", shm->perf_bank_count > 0 ? shm->perf_bank_sizes[inst->perf_bank] : 0);
+        /* -1, not a number, while the child is still filling the table for
+         * THIS bank. The sizes array still holds the previous bank's answer,
+         * and reporting it painted a confident "1/1 Chariots" over a bank of
+         * 32 -- a read that has not answered must never become a picture. The
+         * `:N` name form already had this guard; the counts beside it did not,
+         * so the list drew rows the names then refused to fill. */
+        if (strcmp(key, "patch_count") == 0) {
+            if (shm->patch_bank_count <= 0) return snprintf(buf, buf_len, "0");
+            if (shm->patch_bank_cur != inst->bank) return -1;
+            return snprintf(buf, buf_len, "%d", shm->patch_bank_sizes[inst->bank]);
+        }
+        if (strcmp(key, "performance_count") == 0) {
+            if (shm->perf_bank_count <= 0) return snprintf(buf, buf_len, "0");
+            if (shm->perf_bank_cur != inst->perf_bank) return -1;
+            return snprintf(buf, buf_len, "%d", shm->perf_bank_sizes[inst->perf_bank]);
+        }
         /* Name of the current selection, or of `:N` in the current bank.
          * -1 while the child is still filling the table for this bank. */
         if (strncmp(key, "patch_name", 10) == 0 || strncmp(key, "performance_name", 16) == 0) {
