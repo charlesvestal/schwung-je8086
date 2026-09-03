@@ -2067,8 +2067,12 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (v.count <= 0) return;
         const int target = clampi(atoi(val), 0, v.count - 1);
         *v.sel = target;
-        if (inst->mode == 1) { inst->perf_bank = target; shm->perf_bank_req = target; }
-        else                 { inst->bank = target;      shm->patch_bank_req = target; }
+        if (inst->mode == 1) { inst->perf_bank = target; shm->perf_bank_req = target; inst->performance = 0; }
+        else                 { inst->bank = target;      shm->patch_bank_req = target; inst->patch = 0; }
+        /* Back to the first row. The index is a position in THIS bank, and
+         * carrying it across meant landing at 40 in a bank of 32 -- an index
+         * with no row, so the name read as -1 and the browser showed nothing.
+         * Nothing is loaded by this: only setting patch/performance does that. */
         return;
     }
     if (strcmp(key, "bank") == 0) {
@@ -2252,44 +2256,61 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             if (shm->perf_bank_cur != inst->perf_bank) return -1;
             return snprintf(buf, buf_len, "%d", shm->perf_bank_sizes[inst->perf_bank]);
         }
-        /* Name of the current selection, or of `:N` in the current bank.
-         * -1 while the child is still filling the table for this bank. */
+        /* THE BROWSER NAME COMES FROM THE PARSED BANK, NOT FROM THE SYNTH.
+         *
+         * `patch_name` / `performance_name` -- bare or `:N` -- is the name of a
+         * ROW: read out of the table the child filled from the file it parsed,
+         * with no emulator involvement at all.
+         *
+         * It used to answer "what is LOADED", read out of the temp image, on
+         * the reasoning that a factory performance carries its own patches so
+         * what SOUNDS is "Chariots U" rather than whatever the list is pointing
+         * at. True, and the wrong question for a browser to ask. The image is
+         * an ANSWER FROM THE FIRMWARE: it arrives when the emulator gets round
+         * to replying, so the name appeared "after a moment" -- and after
+         * switching banks it kept showing the previously loaded preset until
+         * the jog moved, because that is what was loaded. Both complaints were
+         * the same sentence: the browser was displaying the synth's state where
+         * the user was reading the list's.
+         *
+         * `loaded_patch_name` / `loaded_performance_name` still ask the image,
+         * for anything that wants what is actually sounding. */
         if (strncmp(key, "patch_name", 10) == 0 || strncmp(key, "performance_name", 16) == 0) {
             const bool perf = key[0] == 'p' && key[1] == 'e';
             const char *suffix = key + (perf ? 16 : 10);
             int idx = perf ? inst->performance : inst->patch;
-            /* Bare `patch_name` / `performance_name` is "what is LOADED", read
-             * out of the temp image, and it follows Edit Part. The browser row
-             * is not the answer: a factory performance carries its own patches
-             * (Chariots' parts read PatchBank = IN PERFORMANCE), so what sounds
-             * is "Chariots U", not whatever the patch list happens to be
-             * pointing at. The `:N` form stays the browser row name. */
-            if (!suffix[0]) {
-                uint32_t block; int bit, cap;
-                const int rp = (!perf && inst->part == 1) ? 1 : 0;
-                const uint8_t *img = img_for(shm, perf ? JP_AREA_COMMON : JP_AREA_PATCH,
-                                             rp, &block, &bit, &cap);
-                if ((shm->img_valid & bit) && cap >= 16) {
-                    SHM_LOAD_FENCE();
-                    char nm[17];
-                    for (int c = 0; c < 16; c++) {
-                        const uint8_t ch = img[c];
-                        nm[c] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : ' ';
-                    }
-                    nm[16] = '\0';
-                    int e = 16; while (e > 0 && nm[e - 1] == ' ') e--;
-                    nm[e] = '\0';
-                    if (e > 0) return snprintf(buf, buf_len, "%s", nm);
-                }
-                /* image not filled yet -- say so, never invent a name */
-                return -1;
-            }
             if (suffix[0] == ':') idx = atoi(suffix + 1);
-            else return -1;
+            else if (suffix[0]) return -1;
+            /* Not yet filled for THIS bank: -1, never a name from the last one.
+             * The child serves this ahead of its audio throttle, so the window
+             * is a millisecond, not the round trip it used to be. */
             if (perf ? (shm->perf_bank_cur != inst->perf_bank) : (shm->patch_bank_cur != inst->bank)) return -1;
             if (idx < 0 || idx >= JP_MAX_PRESETS) return -1;
             SHM_LOAD_FENCE();
-            return snprintf(buf, buf_len, "%s", perf ? shm->perf_names[idx] : shm->patch_names[idx]);
+            const char *nm = perf ? shm->perf_names[idx] : shm->patch_names[idx];
+            if (!nm[0]) return -1;
+            return snprintf(buf, buf_len, "%s", nm);
+        }
+        /* What is actually loaded, from the temp image, following Edit Part. */
+        if (strcmp(key, "loaded_patch_name") == 0 || strcmp(key, "loaded_performance_name") == 0) {
+            const bool perf = key[7] == 'p' && key[8] == 'e';
+            uint32_t block; int bit, cap;
+            const int rp = (!perf && inst->part == 1) ? 1 : 0;
+            const uint8_t *img = img_for(shm, perf ? JP_AREA_COMMON : JP_AREA_PATCH,
+                                         rp, &block, &bit, &cap);
+            if ((shm->img_valid & bit) && cap >= 16) {
+                SHM_LOAD_FENCE();
+                char nm[17];
+                for (int c = 0; c < 16; c++) {
+                    const uint8_t ch = img[c];
+                    nm[c] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : ' ';
+                }
+                nm[16] = '\0';
+                int e = 16; while (e > 0 && nm[e - 1] == ' ') e--;
+                nm[e] = '\0';
+                if (e > 0) return snprintf(buf, buf_len, "%s", nm);
+            }
+            return -1;   /* image not filled yet -- say so, never invent a name */
         }
         const jp_param_t *p = jp_find_param(key);
         if (p) {
