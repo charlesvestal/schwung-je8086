@@ -293,6 +293,16 @@ UNSTABLE, excluding it -- otherwise the harness's own jitter gets read as a
 regression from the change under test. That happened: `performance_select` was
 reported as DIFFERS before the self-check existed.
 
+**The parallel pipeline is very likely why.** The stages let the H8S run ahead of
+the audio, and HOW FAR it gets before the stages catch up depends on thread
+timing, so the emulator covers a slightly different span of emulated time each
+run. Measured directly on a Pi with the threaded pipeline in `Device`: window 1
+(no run-ahead) renders byte-identically every time, window 4 gives three
+different sizes and hashes over three runs. The Move plugin forks with
+1024-deep rings, i.e. an effectively unbounded window, which is the same
+mechanism. Not proven to be the whole story for the case below, but it is the
+same class and it now has a knob.
+
 **Performance SWITCHING is intermittently nondeterministic; the performances are
 not.** Each of performances 4, 9, 17 and 31 held alone renders bit-identical
 across runs, so this is not a random LFO or S&H in the sound. Selecting one
