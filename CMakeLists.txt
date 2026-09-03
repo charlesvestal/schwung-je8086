@@ -23,6 +23,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-gnu-unique>)
 endif()
 
+find_package(Threads REQUIRED)
+
 # ---- Gearmulator dependencies ----
 if(NOT GEARMULATOR_SOURCE)
     set(GEARMULATOR_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/libs/gearmulator/source)
@@ -115,6 +117,16 @@ target_compile_definitions(bench_je_fork PRIVATE BENCH_JE_FORK=1)
 target_link_libraries(bench_je_fork PRIVATE jeLib synthLib baseLib)
 if(NOT APPLE)
     target_link_options(bench_je_fork PRIVATE -static-libstdc++ -static-libgcc)
+endif()
+
+# Threaded pipeline: same stages in one process, for upstream (a plugin cannot
+# fork). Validates that thread_local stage state is sufficient.
+add_executable(bench_je_thread src/benchmark/dsp_bench.cpp)
+target_include_directories(bench_je_thread PRIVATE ${GEARMULATOR_SOURCE})
+target_compile_definitions(bench_je_thread PRIVATE BENCH_JE_THREAD=1)
+target_link_libraries(bench_je_thread PRIVATE jeLib synthLib baseLib Threads::Threads)
+if(NOT APPLE)
+    target_link_options(bench_je_thread PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
 # ---- Snapshot tool ----
