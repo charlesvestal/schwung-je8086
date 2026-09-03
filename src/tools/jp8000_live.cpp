@@ -28,7 +28,15 @@
  *                              values starve throughput now that stages sleep
  *                              rather than spin: below ~32 a handoff is shorter
  *                              than the sleep that waits for it.
- *   JP_BLOCK=256               frames per process() call
+ *   JP_BLOCK=128               frames per process() call
+ *   JP_PERIODS=3               ALSA periods; 3 x 884 = 30 ms on a Pi's own DAC
+ *
+ * LATENCY: on the Raspberry Pi's built-in headphone output the driver fixes the
+ * period at 884 frames (~10 ms at 88.2 kHz) -- measured identical through
+ * plughw and hw, and unchanged by asking for anything smaller -- so ~30 ms is
+ * the floor there and it is the DAC's, not the engine's. The engine renders a
+ * 128-frame block in 0.61 ms against a 1.45 ms budget. Use a USB audio
+ * interface for low latency.
  */
 
 #include <cstdio>
@@ -79,6 +87,24 @@ namespace alsa
 
 	int (*open_)(snd_pcm_t**, const char*, int, int) = nullptr;
 	int (*set_params)(snd_pcm_t*, int, int, unsigned, unsigned, int, unsigned) = nullptr;
+	/* Explicit hw_params. snd_pcm_set_params only takes a total latency and picks
+	 * the period itself: on the Pi's bcm2835 it chose 884 frames and, for any
+	 * latency under ~20 ms, a buffer of exactly ONE period -- no double buffering,
+	 * so the card starved every time we were writing. That produced an identical
+	 * 682 xruns at 10, 6 and 4 ms, which is what a systematic misconfiguration
+	 * looks like next to genuine jitter. The driver itself advertises periods down
+	 * to 80 frames. */
+	int (*hw_params_malloc)(void**) = nullptr;
+	void (*hw_params_free)(void*) = nullptr;
+	int (*hw_params_any)(snd_pcm_t*, void*) = nullptr;
+	int (*hw_set_access)(snd_pcm_t*, void*, int) = nullptr;
+	int (*hw_set_format)(snd_pcm_t*, void*, int) = nullptr;
+	int (*hw_set_channels)(snd_pcm_t*, void*, unsigned) = nullptr;
+	int (*hw_set_rate_near)(snd_pcm_t*, void*, unsigned*, int*) = nullptr;
+	int (*hw_set_period_size_near)(snd_pcm_t*, void*, uframes*, int*) = nullptr;
+	int (*hw_set_periods_near)(snd_pcm_t*, void*, unsigned*, int*) = nullptr;
+	int (*hw_params_)(snd_pcm_t*, void*) = nullptr;
+	int (*prepare)(snd_pcm_t*) = nullptr;
 	sframes (*writei)(snd_pcm_t*, const void*, uframes) = nullptr;
 	int (*recover)(snd_pcm_t*, int, int) = nullptr;
 	int (*close_)(snd_pcm_t*) = nullptr;
@@ -97,6 +123,17 @@ namespace alsa
 		close_      = reinterpret_cast<decltype(close_)>(sym("snd_pcm_close"));
 		drain       = reinterpret_cast<decltype(drain)>(sym("snd_pcm_drain"));
 		strerror_   = reinterpret_cast<decltype(strerror_)>(sym("snd_strerror"));
+		hw_params_malloc = reinterpret_cast<decltype(hw_params_malloc)>(sym("snd_pcm_hw_params_malloc"));
+		hw_params_free   = reinterpret_cast<decltype(hw_params_free)>(sym("snd_pcm_hw_params_free"));
+		hw_params_any    = reinterpret_cast<decltype(hw_params_any)>(sym("snd_pcm_hw_params_any"));
+		hw_set_access    = reinterpret_cast<decltype(hw_set_access)>(sym("snd_pcm_hw_params_set_access"));
+		hw_set_format    = reinterpret_cast<decltype(hw_set_format)>(sym("snd_pcm_hw_params_set_format"));
+		hw_set_channels  = reinterpret_cast<decltype(hw_set_channels)>(sym("snd_pcm_hw_params_set_channels"));
+		hw_set_rate_near = reinterpret_cast<decltype(hw_set_rate_near)>(sym("snd_pcm_hw_params_set_rate_near"));
+		hw_set_period_size_near = reinterpret_cast<decltype(hw_set_period_size_near)>(sym("snd_pcm_hw_params_set_period_size_near"));
+		hw_set_periods_near = reinterpret_cast<decltype(hw_set_periods_near)>(sym("snd_pcm_hw_params_set_periods_near"));
+		hw_params_       = reinterpret_cast<decltype(hw_params_)>(sym("snd_pcm_hw_params"));
+		prepare          = reinterpret_cast<decltype(prepare)>(sym("snd_pcm_prepare"));
 		return open_ && set_params && writei && recover && close_;
 	}
 }
@@ -209,13 +246,48 @@ int main(int _argc, char* _argv[])
 			fprintf(stderr, "[live] cannot open %s: %s\n", alsaDev, alsa::strerror_ ? alsa::strerror_(e) : "?");
 			return 1;
 		}
-		// soft_resample=1 lets ALSA convert 88.2 kHz to whatever the codec does
-		if (const int e = alsa::set_params(pcm, alsa::FormatS16LE, alsa::AccessRwInterleaved, 2, HostSR, 1, bufUs); e < 0)
+		bool configured = false;
+		if (alsa::hw_params_malloc && alsa::hw_params_any && alsa::hw_params_)
 		{
-			fprintf(stderr, "[live] set_params failed: %s\n", alsa::strerror_ ? alsa::strerror_(e) : "?");
-			return 1;
+			void* hw = nullptr;
+			if (alsa::hw_params_malloc(&hw) >= 0)
+			{
+				alsa::uframes period = block;		// one period per process() call
+				unsigned periods = getenv("JP_PERIODS") ? static_cast<unsigned>(atoi(getenv("JP_PERIODS"))) : 3;
+				// 3 is the floor that runs clean on a Pi: the bcm2835 output pins the
+				// period at 884 frames (~10 ms at 88.2 kHz) whatever we ask for, and
+				// two periods xrun. A USB interface will accept far smaller ones.
+				unsigned rate = HostSR;
+				int dir = 0;
+				alsa::hw_params_any(pcm, hw);
+				alsa::hw_set_access(pcm, hw, alsa::AccessRwInterleaved);
+				alsa::hw_set_format(pcm, hw, alsa::FormatS16LE);
+				alsa::hw_set_channels(pcm, hw, 2);
+				alsa::hw_set_rate_near(pcm, hw, &rate, &dir);
+				dir = 0;
+				alsa::hw_set_period_size_near(pcm, hw, &period, &dir);
+				dir = 0;
+				alsa::hw_set_periods_near(pcm, hw, &periods, &dir);
+				if (alsa::hw_params_(pcm, hw) >= 0)
+				{
+					configured = true;
+					fprintf(stderr, "[live] audio: %s direct, period %lu frames x %u = %.1f ms buffer, %u Hz\n",
+					        alsaDev, static_cast<unsigned long>(period), periods,
+					        1000.0 * period * periods / rate, rate);
+				}
+				alsa::hw_params_free(hw);
+				if (configured && alsa::prepare) alsa::prepare(pcm);
+			}
 		}
-		fprintf(stderr, "[live] audio: %s direct, %u us buffer\n", alsaDev, bufUs);
+		if (!configured)
+		{
+			if (const int e = alsa::set_params(pcm, alsa::FormatS16LE, alsa::AccessRwInterleaved, 2, HostSR, 1, bufUs); e < 0)
+			{
+				fprintf(stderr, "[live] set_params failed: %s\n", alsa::strerror_ ? alsa::strerror_(e) : "?");
+				return 1;
+			}
+			fprintf(stderr, "[live] audio: %s direct, %u us buffer (fallback path)\n", alsaDev, bufUs);
+		}
 	}
 	else
 	{
