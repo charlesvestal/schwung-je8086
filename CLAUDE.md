@@ -98,10 +98,26 @@ is identical at -2, 0 and +2).
 `setFader(which, value)` exists, and `kFader_Ribbon1/2` sit in its table beside
 pitch bend and the mod wheel — nothing calls it yet, which makes Ribbon
 Relative/Hold, and the forty `ctl_*` patch depths they scale, **latent rather
-than impossible**. Gate Time Ratio is kept on weaker grounds still: the render
-that appeared to show it inert never established the arpeggiator was running, so
-it measured nothing. Being unable to observe a parameter is not the same as
-knowing it does nothing — **a stub device is knowing.**
+than impossible**. Gate Time Ratio is the same shape, and it took two attempts to
+say so honestly: measured against a **verified-running arpeggiator** (mode UP,
+beat NORMAL 1/16, 11 voice starts at 0.405 s) all six of its values render
+byte-identical audio. It belongs to the pattern/RPS block, not the arpeggiator.
+The first attempt used a sustained pad, never established the arp was running at
+all, and was reported as if it had proved something.
+
+**RPS is selectable and silent, and that is the whole pattern story.** The 84
+non-NORMAL beat patterns DO play — `arp_beat` = SEQUENCE A1 in mode UP gives an
+uneven rhythm (IOI sd 0.142 s) against NORMAL 1/16's metronomic 0.405 s — but
+`arp_mode` = RPS gives **zero voice starts** on every pattern family, across the
+whole keyboard, with and without a running clock. RPS plays back *recorded*
+phrases; `PatternSetup` (SystemArea `0x1000`) holds only 48 loop lengths, not
+phrase data, and phrases are recorded with the panel REC plus the keyboard —
+which is the stub again. So the seven pattern/motion system parameters have
+nothing to act on, and the module offers an `arp_mode` option that produces
+silence. Loading phrases over sysex is the path that would change all of this.
+
+Being unable to observe a parameter is not the same as knowing it does nothing —
+**a stub device is knowing.**
 
 **One setup page.** Ten parameters do not fit eight cells, so the split is where
 it costs least: the eight a slot can reach today stay together (channels and
