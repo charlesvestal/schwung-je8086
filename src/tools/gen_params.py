@@ -242,23 +242,29 @@ for idx, key, name, short in COMMON:
 # are skipped. Ranges from jemiditypes.h SystemParameter and verified writable
 # by read-back (sysreq/sysparam in jp8000_render).
 SYSTEM = [
-    # Twelve of the keyboard's system parameters. The pattern/motion sequencer
-    # block and the rack-only tail are skipped; so is Power-Up Mode, which is
-    # the one entry a module CANNOT honour -- the child boots from a snapshot
-    # and we then apply the slot's own state, so what the firmware would have
-    # loaded at power-on is overwritten before anyone can hear it.
+    # Ten of the keyboard's system parameters, and it is the exclusions that
+    # carry the reasoning. Three entries govern hardware that CANNOT EXIST in
+    # an emulation hosted in a slot, so no user setting of them is ever
+    # observable:
     #
-    # Several of the rest do nothing MEASURABLE through a Schwung slot today:
-    # Keyboard Shift transposes the physical keyboard (a note on the remote
-    # channel is identical at -2, 0 and +2), Local disconnects an internal
-    # keyboard we do not have, and the ribbon is a panel fader
-    # (kFader_Ribbon1/2) that nothing here can move -- jemiditypes.h marks
-    # those three "(keyboard only)". They stay anyway: they are per-set,
-    # per-preset state that rides in the "sys" blob, and a setting that is
-    # latent is not a setting that is wrong. Gate Time Ratio is listed for the
-    # same reason and with less certainty still -- the render that appeared to
-    # show it inert never established the arpeggiator was running, so it
-    # measured nothing.
+    #   Power-Up Mode   decides what the keyboard loads at power-on. The child
+    #                   boots from a snapshot and we apply the slot's own state
+    #                   over it, so the host has already answered.
+    #   Local           switches the internal keyboard into the sound engine.
+    #                   `KeyScanner::read()` returns 0 unconditionally and its
+    #                   write() is empty -- the key matrix is a STUB, so that
+    #                   keyboard reports no keys pressed, forever.
+    #   Keyboard Shift  transposes the same stub. Measured to confirm it:
+    #                   a note on the remote channel is identical at -2, 0, +2.
+    #
+    # The ribbon pair is NOT in that category and stays. `Faders` is fully
+    # emulated, `setFader(which, value)` exists, and kFader_Ribbon1/2 sit in
+    # its table beside pitch bend and the mod wheel -- nothing calls it yet,
+    # which makes the ribbon latent rather than impossible. Gate Time Ratio
+    # stays on weaker grounds still: the render that appeared to show it inert
+    # never established the arpeggiator was running, so it measured nothing.
+    # Being unable to observe a parameter is not the same as knowing it does
+    # nothing; a stub device IS knowing.
     #
     # The seventh field is the DEFAULT, and it is what the panel reads after
     # our boot force, not the factory value. Every max below WAS measured: the
@@ -270,7 +276,6 @@ SYSTEM = [
     (0x02, "sys_perf_ctrl_ch", "Perf Ctrl Ch", "PerfCh", "enum",
      [str(i) for i in range(1, 17)] + ["Off"], 16),
     (0x04, "sys_midi_sync", "MIDI Sync", "Sync", "enum", ["Off", "On"], 1),
-    (0x05, "sys_local", "Local", "Local", "enum", ["Off", "On"], 1),
     (0x06, "sys_txrx_edit_mode", "TxRx Edit Mode", "EdMode", "enum", ["Mode 1", "Mode 2"], 1),
     (0x07, "sys_txrx_edit", "TxRx Edit", "Edit", "enum", ["Off", "On"], 1),
     (0x08, "sys_txrx_pc", "TxRx Prog Change", "PC", "enum", ["Off", "PC", "Bank Sel + PC"], 2),
@@ -282,8 +287,6 @@ SYSTEM = [
     (0x0a, "sys_master_tune", "Master Tune", "Tune", "int", (0, 100), 50),
     (0x0e, "sys_gate_ratio", "Gate Time Ratio", "Gate", "enum",
      ["Real", "Staccato", "33%", "50%", "66%", "100%"], 0),
-    (0x14, "sys_kbd_shift", "Keyboard Shift", "Shift", "enum",
-     ["-2", "-1", "0", "+1", "+2"], 2),
     (0x15, "sys_ribbon_rel", "Ribbon Relative", "RibRel", "enum", ["Off", "On"], 0),
     (0x16, "sys_ribbon_hold", "Ribbon Hold", "RibHld", "enum", ["Off", "On"], 0),
 ]
@@ -456,12 +459,16 @@ PERF_LEVELS = [
 # they are the ones a Schwung slot actually has to get right -- Remote Ctrl Ch
 # is what makes the arpeggiator hear anything at all -- and the rest sit one
 # dive down, grouped the way the manual groups them.
+# One setup page. Ten parameters do not fit eight cells, so the split is where
+# it costs least: the eight that a slot can actually reach today stay together
+# on Setup -- channels and tuning on the top row, the TxRx switches and gate on
+# the bottom -- and the two ribbon settings, which nothing drives yet, are the
+# single dive. Three pages of two, three and four cells were the alternative.
 SYS_LEVELS = [
-    ("sys_txrx", "TxRx", K("sys_txrx_edit", "sys_txrx_edit_mode", "sys_txrx_pc")),
-    ("sys_kbd", "Keyboard", K("sys_master_tune", "sys_kbd_shift", "sys_gate_ratio")),
     ("sys_ribbon", "Ribbon", K("sys_ribbon_rel", "sys_ribbon_hold")),
 ]
-SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_local", "sys_midi_sync")
+SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_midi_sync", "sys_master_tune",
+             "sys_txrx_edit", "sys_txrx_edit_mode", "sys_txrx_pc", "sys_gate_ratio")
 
 covered = set(k for _, _, ks in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS for k in ks) | set(SYS_MAIN)
 # panel_select has no page of its own on purpose: "Edit Part" writes it, and a
@@ -538,7 +545,7 @@ levels = {
 levels["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
                                   "short_name": LEVEL_SHORT.get("perf_main", {}).get(k) or byKey[k]["short"]}
                                  for k in levels["perf_main"]["knobs"]] + levels["perf_main"]["params"]
-levels["system"] = level("System", SYS_MAIN, lid="system",
+levels["system"] = level("Setup", SYS_MAIN, lid="system",
                          extra=[{"level": lid, "label": lab} for lid, lab, _ in SYS_LEVELS])
 for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS:
     levels[lid] = level(lab, keys, lid=lid)
