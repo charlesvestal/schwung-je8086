@@ -602,6 +602,19 @@ for p in params:
     if p["key"] == "tempo": e["unit"] = "BPM"
     if p["key"] in VIZ:
         e["viz"] = {"group": VIZ[p["key"]][0], "role": VIZ[p["key"]][1]}
+    elif p["key"].startswith(("ctl_", "vel_")):
+        # viz: false -- keep the host's DETECTORS off these.
+        #
+        # Declaring no viz is not the same as declaring none wanted. viz.mjs
+        # runs a detector pool over every key nobody claimed, and it infers a
+        # group from the NAMES: "C.Pitch Env Attack" next to "C.Pitch Env
+        # Decay" reads as a pitch envelope, so Ribbon Ctrl - 2 drew an envelope
+        # curve across two modulation depths. The picture was of a shape the
+        # synth never has.
+        #
+        # Every ctl_/vel_ parameter is an AMOUNT -- how far the ribbon or
+        # velocity moves something -- so none of them may become a graphic.
+        e["viz"] = False
     if p["key"] in ("up_transpose", "lo_transpose"): e["unit"] = "st"
     cp.append(e)
 cp_static = json.dumps(cp, separators=(",", ":"))
