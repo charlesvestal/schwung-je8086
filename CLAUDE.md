@@ -260,6 +260,9 @@ recompile burst at a patch change. `patch_sweep` walks eight factory patches
 `pc`/`cc` take an optional channel so a performance select on channel 16 is
 expressible at all.
 
+The plan for what goes upstream, in what order, and which of our commits has to
+be split to get there is `docs/plans/2026-09-03-upstreaming.md`.
+
 **Upstream has no JP-8000 audio regression corpus.** `jeTestConsole` plays the
 factory demo to a wav; there is no `add_test` and no ctest anywhere for je8086.
 Any bit-exactness evidence for an upstream PR has to come from here.
