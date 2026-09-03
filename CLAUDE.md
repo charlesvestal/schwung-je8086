@@ -27,26 +27,40 @@ audio (2:1 decimation), so decimation does NOT halve the work — an earlier
 | Serial (H8S + 4 ASICs, 1 core) | 0.37x | 0.30–0.33x after ARM64 JIT revert |
 | Fork parallel (2+2 ASICs, 2 cores) | 0.72x | ~0.58x after ARM64 JIT revert |
 
-**STALE — these figures predate the 2026-09-02 optimizations** (timer event
-horizon, H8S page-mapped accesses, ESP per-core dirty + Assembler, dense ARM64
-emitter). They have not been re-measured on device since, and the module is
-reported to play without dropouts, i.e. above real-time. Re-measure with
-`bench_je` (serial, the number relevant to upstream) and `bench_je_fork` before
-quoting anything here.
+**Measured 2026-09-03 on a Raspberry Pi 4B rev 1.5 @ 1.8 GHz** (Debian 13
+arm64, PSU + wifi, `throttled=0x0` before and after, best of 3, variance below
+0.01 s). Serial `jp8000_render`, i.e. ONE process and no fork -- the
+configuration upstream would get:
 
-Measuring on a dev Mac is useless for this: Apple Silicon renders the
-optimizations invisible (6.92x vs 6.93x serial, REF vs optimized), because a
-wide out-of-order core hides the per-instruction timer loop, the pointer-table
-indirection and the extra ESP loads/stores that an A72 actually pays for. Use
-A72 hardware; a bare Pi 4 isolates it from Move's core pinning and RT budget.
+| Script | Before opts | After opts | Speedup | RT factor |
+|--------|-------------|------------|---------|-----------|
+| `sustained_c4` (5 s) | 12.78 s | 7.34 s | 1.74x | 0.39x -> 0.68x |
+| `patch_sweep` (10 s) | 24.31 s | 13.36 s | 1.82x | 0.41x -> 0.75x |
 
-**The paragraph below is the pre-optimization state, kept for history.**
+"Before" is the rebased tree with the three performance commits removed (branch
+`ref-no-perf`); "after" is HEAD. Output is byte-identical between them, and
+`sustained_c4` hashes the same on macOS/arm64 and Linux/arm64 -- the engine is
+deterministic across OS and toolchain, so a reviewer can reproduce the hash.
 
-**The full emulator is below real-time on Move.** Audio works end-to-end
-(boot, snapshot, MIDI, notes) but the ring underruns continuously →
-dropouts. Cost is the same idle vs. playing: the ASICs always run their
-full programs, and the ESP JIT does not recompile during notes (verified
-with snap_bisect counters).
+**The serial engine is still below real-time, even at 1.8 GHz with every
+optimization.** Move's CM4 runs at 1.5 GHz, ~20% slower, so serial there is
+roughly 0.57-0.63x. Real-time playback on Move therefore comes from the FORK
+PIPELINE spreading ASICs across cores, not from the H8S/ESP work. Keep the two
+claims apart: "~1.8x faster on A72, bit-exact" is the upstream claim; "real-time
+on Move" is a product claim that depends on machinery upstream is not getting.
+
+**Do not benchmark this on a dev Mac.** Apple Silicon renders the optimizations
+invisible -- 6.92x vs 6.93x serial, before vs after -- because a wide
+out-of-order core hides the per-instruction timer loop, the pointer-table
+indirection and the extra ESP loads/stores that an A72 actually pays for. The
+same comparison on A72 is 1.74x. Use A72 hardware.
+
+The pre-optimization history: serial was measured at 0.37x and fork-parallel
+(2+2 ASICs, 2 cores) at 0.72x on Move in June 2026, and a "fork + resample
+~1.44x" row was deleted then as a doubling error -- one second of 44.1 kHz out
+needs a full second of 88.2 kHz engine audio, so decimation does not halve the
+work. That retracted 1.4x nearly went into a public post; the numbers above are
+the ones to quote.
 
 ## Snapshots
 
