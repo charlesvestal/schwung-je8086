@@ -375,6 +375,14 @@ struct jp8000_shm_t {
      * jitter buffer the three forked stages live on, which is why it is a dial
      * and not a smaller constant. */
     volatile int audio_throttle;
+    /* When the parent last drained the ring. A slot the shim has idled stops
+     * calling render_block entirely, and the child cannot tell that from
+     * "briefly ahead" without being told. */
+    volatile uint64_t last_render_us;
+    /* Diagnostic: re-read the temp performance FROM THE FIRMWARE, overwriting
+     * the image the parent wrote optimistically. The only way to tell "we sent
+     * it" from "it took it". */
+    volatile int want_temp_refresh;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     /* Folder each bank came from, "" for the top of banks/. The browser walks
      * folder -> bank -> preset. */
@@ -914,7 +922,7 @@ static void child_drain_midi_out(jp8000_shm_t *shm, jeLib::Je8086 &je, std::vect
             child_image_from_dt1(shm, e.sysex.data(), (int)e.sysex.size());
 }
 
-static void child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
+static bool child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
     /* Off unless armed. This is the child process, which is not the SPI
      * callback, so a printf here is allowed -- and it is the only place the
      * bytes we hand the firmware can be read. A parameter write's read-back
@@ -923,7 +931,9 @@ static void child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
     static const bool trace = getenv("JP_SYSEX_LOG") != nullptr;
     uint8_t m[JP_SX_MAX_MSG];
     int len;
+    bool sent = false;
     while ((len = sx_ring_pop(shm, m, sizeof(m))) > 0) {
+        sent = true;
         if (trace) {
             fprintf(stderr, "[jp sysex-out %2d]", len);
             for (int i = 0; i < len; i++) fprintf(stderr, " %02X", m[i]);
@@ -931,6 +941,7 @@ static void child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
         }
         child_send_sysex(je, m, len);
     }
+    return sent;
 }
 
 /* System settings the editor needs, sent once at boot (what the JUCE
@@ -1479,6 +1490,11 @@ static void child_main(jp8000_shm_t *shm) {
     const char *await_env = getenv("JP_AWAIT_TEMP_MS");
     const uint64_t AWAIT_TEMP_US = (uint64_t)(await_env ? atoi(await_env) : 3000) * 1000ull;
     uint64_t awaiting_until = 0;
+    /* ~450 ms of emulated time at 88.2 kHz: comfortably past the ~180 ms a
+     * whole-performance restore takes to clock in, and a knob edit is 13
+     * bytes, so a quiet slot is not spun for long. */
+    const uint32_t SYSEX_SETTLE_STEPS = 160000;
+    uint32_t sysex_settle = 0;
     auto now_us = []() -> uint64_t {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -1527,6 +1543,7 @@ static void child_main(jp8000_shm_t *shm) {
 
         const bool ui_pending = (shm->load_seq != shm->load_done)
                               || awaiting_until != 0
+                              || sysex_settle > 0
                               || sx_ring_available(shm) > 0
                               || midi_fifo_available(shm) > 0;
 
@@ -1535,8 +1552,55 @@ static void child_main(jp8000_shm_t *shm) {
             continue;
         }
 
+        /* A FULL RING IS A THROTTLE EVEN WHEN WE DECIDE TO STEP.
+         *
+         * Stepping with the ring full does not run at speed -- the forked
+         * stages back up behind it and manage a small fraction of realtime --
+         * so "keep stepping until the firmware has consumed this" starved
+         * anyway, and no amount of extra settle helped: a whole-performance
+         * restore needs ~180 ms of EMULATED time and the child was getting a
+         * few ms of it. If nobody has drained the ring for 50 ms the slot is
+         * idled, its buffered audio is going nowhere, and dropping it lets the
+         * child run flat out for the moment the firmware needs.
+         *
+         * Only when idle. A slot being consumed keeps every sample. */
+        static const bool no_release = getenv("JP_NO_RING_RELEASE") != nullptr;
+        if (!no_release && ui_pending && audio_ring_available(shm) >= shm->audio_throttle) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            const uint64_t nu = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+            if (nu - shm->last_render_us > 50000ull) shm->ring_read = shm->ring_write;
+        }
+
         if (child_process_midi(shm, *je)) child_request_temp(*je);
-        child_pump_sysex_ring(shm, *je);
+        /* HANDING THE BYTES OVER IS NOT THE SAME AS THE FIRMWARE READING THEM.
+         *
+         * Keep stepping for a moment after any sysex, or the child drains the
+         * ring into the emulator and goes straight back to sleep with the
+         * bytes unparsed. That is what broke a SET SWITCH: state_apply pushes
+         * the whole temp performance as ~560 bytes of DT1 on a live instance,
+         * and on an idle slot nothing ever ran to consume it -- so the image
+         * we wrote optimistically said Sandstorm while Chariots kept playing.
+         * A preset load had this already, through the temp-dump wait; a raw
+         * pump had nothing.
+         *
+         * Counted in STEPS, not wall clock -- the opposite unit from the load
+         * wait next to it, and for a reason. That one has a real completion
+         * signal (the temp dump arriving) and only needs a ceiling, so wall
+         * clock is right. This one has no completion signal, so the bound IS
+         * the duration, and what has to elapse is EMULATED time: ~560 bytes at
+         * 31250 baud is ~180 ms of it. A wall-clock 400 ms looked equivalent
+         * and left the restore half-applied, because an unthrottled child does
+         * not run at 1x. */
+        if (shm->want_temp_refresh) {
+            shm->want_temp_refresh = 0;
+            shm->temp_rx_mask = 0;
+            shm->temp_pending = 1;
+            SHM_STORE_FENCE();
+            child_request_temp(*je);
+            awaiting_until = now_us() + AWAIT_TEMP_US;
+        }
+        if (child_pump_sysex_ring(shm, *je)) sysex_settle = SYSEX_SETTLE_STEPS;
+        if (sysex_settle > 0) sysex_settle--;
         /* Off the per-step path: a load is a few hundred bytes of DT1. */
         if ((++loop_iter & 63) == 0) {
             if (child_serve_load(shm, banks, *je)) awaiting_until = now_us() + AWAIT_TEMP_US;
@@ -1642,6 +1706,31 @@ static void* boot_thread_func(void *arg) {
         if (inst->pending_state_set) {
             state_apply(inst, inst->pending_state);
             inst->pending_state_set = 0;
+            /* DON'T DECLARE READY UNTIL THE FIRMWARE HAS ACTUALLY TAKEN IT.
+             *
+             * state_apply queues ~560 bytes of DT1 and writes our image
+             * optimistically. The emulator only parses those bytes while it
+             * STEPS, and a freshly loaded slot is silent, so the shim idles it
+             * and nothing drives the child -- the image said the restored
+             * performance while the previous one kept sounding. Switching a
+             * set reloads every module, so this is the path a set switch
+             * takes.
+             *
+             * Ask the firmware to dump its temp back and wait for it here.
+             * This thread is SCHED_OTHER and nobody is listening to the slot
+             * yet, so waiting is free; the alternative -- hoping something
+             * else happens to drive the emulator soon enough -- is what the
+             * bug was. Bounded, because a firmware that never answers must
+             * still yield a usable slot. */
+            jp8000_shm_t *sh = inst->shm;
+            sh->temp_rx_mask = 0;
+            sh->temp_pending = 1;
+            SHM_STORE_FENCE();
+            sh->want_temp_refresh = 1;
+            for (int i = 0; i < 400 && sh->temp_pending; i++) usleep(10000);
+            fprintf(stderr, "JP-8000: state restore %s\n",
+                    sh->temp_pending ? "NOT confirmed by the firmware (timed out)"
+                                     : "confirmed by the firmware");
         } else {
             inst->shm->patch_bank_req = inst->bank;
             inst->shm->perf_bank_req = inst->perf_bank;
@@ -2093,6 +2182,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (ps) param_write(inst, ps, inst->part);
         return;
     }
+    if (strcmp(key, "temp_refresh") == 0) { shm->want_temp_refresh = 1; return; }
     if (strcmp(key, "buffer_ms") == 0) {
         /* ms -> 88.2 kHz samples. Lowering it takes effect by simply not
          * refilling: the ring drains to the new target on its own. Raising it
@@ -2263,6 +2353,8 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * control; JE_FIXED_LATENCY_MS is the emulator's own note-to-sound
          * response, measured on a paced consumer (82 ms total against a 65 ms
          * ring). Nothing in the host consumes this yet. */
+        if (strcmp(key, "temp_pending") == 0)
+            return snprintf(buf, buf_len, "%d", shm->temp_pending ? 1 : 0);
         if (strcmp(key, "latency_ms") == 0)
             return snprintf(buf, buf_len, "%d",
                             (int)(shm->audio_throttle / 88.2f + 0.5f) + JE_FIXED_LATENCY_MS);
@@ -2418,6 +2510,10 @@ static void v2_render_block(void *instance, int16_t *out, int frames) {
 
     /* The audio ring contains samples at 88200 Hz.
      * Output is 44100 Hz. Decimate 2:1 with simple averaging. */
+    {   /* vDSO clock_gettime, ~340 ns -- affordable on the SPI callback. */
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        shm->last_render_us = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+    }
     SHM_LOAD_FENCE();  /* ensure we see audio data written before ring_write */
     int avail = audio_ring_available(shm);
     int needed = frames * 2; /* 2 input samples per 1 output sample */

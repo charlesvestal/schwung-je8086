@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <cstdint>
 #include <ctime>
 #include <dlfcn.h>
@@ -136,6 +137,20 @@ int main(int argc, char **argv) {
     }
 ready:
     fprintf(stderr, "ready after %.1fs\n", (now_ns() - t0) / 1e9);
+    /* An op written !key=value is applied IMMEDIATELY after create_instance,
+     * before the boot completes -- which is what the chain host does with the
+     * slot state, and is a different code path inside the plugin (pending_state
+     * applied by the boot thread) from a set_param after it is ready. Without
+     * this the harness could only ever exercise the second one. */
+    for (int i = 3; i < argc; i++) {
+        if (argv[i][0] != '!') continue;
+        const char *eq = strchr(argv[i] + 1, '=');
+        if (!eq) continue;
+        std::string k(argv[i] + 1, eq - argv[i] - 1);
+        printf("  early set %s = (%zu bytes)\n", k.c_str(), strlen(eq + 1));
+        api->set_param(inst, k.c_str(), eq + 1);
+    }
+
     pump_arg pump{api, inst, false};
     pthread_t pump_th;
     pthread_create(&pump_th, nullptr, render_pump, &pump);
@@ -149,7 +164,8 @@ ready:
     } else {
         for (int i = 3; i < argc; i++) {
             const char *op = argv[i];
-            if (op[0] == '@') { usleep((useconds_t)atoi(op + 1) * 1000); continue; }
+            if (op[0] == '!') continue;   /* already applied before boot */
+        if (op[0] == '@') { usleep((useconds_t)atoi(op + 1) * 1000); continue; }
             if (strncmp(op, "note:", 5) == 0) {
                 /* note:<on|off>:<n>:<vel>:<ch1based> */
                 char which[8]; int nn=60, vv=100, cc=1;
