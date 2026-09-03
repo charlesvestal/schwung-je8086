@@ -325,6 +325,14 @@ assert len(byKey) == len(params), "duplicate keys"
 # a descriptor here so it can be placed on a page like any other cell. It is NOT
 # appended to `params`, so it stays out of chain_params (which declares it
 # explicitly above) and out of the page-coverage assertion.
+# Plugin-side, not firmware: how far ahead the child renders. It is the module's
+# output LATENCY -- the ring is played back from behind its write head -- and it
+# is also the jitter buffer the three forked stages rely on, so it is a dial, not
+# a constant. 68 ms is what it always was.
+byKey["buffer_ms"] = dict(key="buffer_ms", name="Audio Buffer", short="Buf", area=None,
+                          lin=None, bit14=False, default=10, type="int",
+                          min=4, max=90, off=0, unit="ms")
+
 byKey["part"] = dict(key="part", name="Edit Part", short="Part", area=None, lin=None,
                      bit14=False, default=0, type="enum",
                      options=["Upper", "Lower", "Both"], min=0, max=2, off=0)
@@ -481,6 +489,10 @@ PERF_LEVELS = [
 # single dive. Three pages of two, three and four cells were the alternative.
 SYS_LEVELS = [
     ("sys_ribbon", "Ribbon", K("sys_ribbon_rel", "sys_ribbon_hold")),
+    # Not a JP-8000 setting at all -- it belongs to our wrapper -- but this is
+    # where a per-instance setting goes, and it is the one control that decides
+    # whether the module plays in time with the rest of the rig.
+    ("sys_audio", "Audio", ["buffer_ms"]),
 ]
 SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_midi_sync", "sys_master_tune",
              "sys_txrx_edit", "sys_txrx_edit_mode", "sys_txrx_pc", "sys_gate_ratio")
@@ -488,7 +500,7 @@ SYS_MAIN = K("sys_remote_ch", "sys_perf_ctrl_ch", "sys_midi_sync", "sys_master_t
 covered = set(k for _, _, ks in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS for k in ks) | set(SYS_MAIN)
 # panel_select has no page of its own on purpose: "Edit Part" writes it, and a
 # second row for the same switch could disagree with the first.
-UNPAGED = {"panel_select"}
+UNPAGED = {"panel_select", "buffer_ms"}
 missing = [p["key"] for p in params if p["key"] not in covered and p["key"] not in UNPAGED]
 assert not missing, missing
 
@@ -723,6 +735,8 @@ def short_options_for(key, opts):
 
 cp = []
 cp.append({"key": "mode", "name": "Mode", "type": "mode", "options": ["Patch", "Performance", "System"]})
+cp.append({"key": "buffer_ms", "name": "Audio Buffer", "short_name": "Buf", "type": "int",
+           "min": 4, "max": 90, "default": 10, "unit": "ms"})
 cp.append({"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum",
            "options": ["Upper", "Lower", "Both"],
            # declared here rather than through the params loop, so it needs its own
