@@ -101,7 +101,8 @@
         "midi_out": false,
         "default_forward_channel": 3,
         "chainable": true,
-        "component_type": "sound_generator"
+        "component_type": "sound_generator",
+        "forks_processes": true
     },
     "_chain_params_note": "Fallback only. The live contract (169 params + bank enums) is served by get_param('chain_params') in dsp/jp8000_plugin.cpp, generated from tools/gen_params.py into dsp/jp8000_params.h. Keys and ranges here mirror the patch_main knobs.",
     "chain_params": [
