@@ -32,22 +32,29 @@ endif()
 set(ASMJIT_STATIC TRUE)
 set(ASMJIT_NO_INSTALL TRUE)
 set(BUILD_SHARED_LIBS OFF)
-add_subdirectory(${GEARMULATOR_SOURCE}/dsp56300/source ${CMAKE_BINARY_DIR}/dsp56300)
+add_subdirectory(${GEARMULATOR_SOURCE}/cpu/dsp56300/source ${CMAKE_BINARY_DIR}/dsp56300)
 
 # Base library
-add_subdirectory(${GEARMULATOR_SOURCE}/baseLib ${CMAKE_BINARY_DIR}/baseLib)
+add_subdirectory(${GEARMULATOR_SOURCE}/framework/baseLib ${CMAKE_BINARY_DIR}/baseLib)
 
 # Synth library (core device abstraction)
-add_subdirectory(${GEARMULATOR_SOURCE}/synthLib ${CMAKE_BINARY_DIR}/synthLib)
+add_subdirectory(${GEARMULATOR_SOURCE}/framework/synthLib ${CMAKE_BINARY_DIR}/synthLib)
 
 # Libresample (sample rate conversion — transitive dep of synthLib)
-add_subdirectory(${GEARMULATOR_SOURCE}/libresample ${CMAKE_BINARY_DIR}/libresample)
+add_subdirectory(${GEARMULATOR_SOURCE}/3rdparty/libresample ${CMAKE_BINARY_DIR}/libresample)
 
 # Hardware library (needed by jeLib for H8S emulation)
-add_subdirectory(${GEARMULATOR_SOURCE}/hardwareLib ${CMAKE_BINARY_DIR}/hardwareLib)
+add_subdirectory(${GEARMULATOR_SOURCE}/framework/hardwareLib ${CMAKE_BINARY_DIR}/hardwareLib)
 
 # MC68k emulator (needed by hardwareLib)
-add_subdirectory(${GEARMULATOR_SOURCE}/mc68k ${CMAKE_BINARY_DIR}/mc68k)
+add_subdirectory(${GEARMULATOR_SOURCE}/cpu/mc68k ${CMAKE_BINARY_DIR}/mc68k)
+
+# mc68k declares no include root of its own; hand it the cpu/ root, as
+# upstream's source/CMakeLists.txt does.
+target_include_directories(68kEmu PUBLIC ${GEARMULATOR_SOURCE}/cpu)
+
+# H8S CPU core (jeLib links it as its own target since the upstream restructure)
+add_subdirectory(${GEARMULATOR_SOURCE}/cpu/h8s ${CMAKE_BINARY_DIR}/h8s)
 
 # Ronaldo / JE-8086 (JP-8000) dependencies
 add_subdirectory(${GEARMULATOR_SOURCE}/ronaldo/common ${CMAKE_BINARY_DIR}/rLib)
@@ -117,15 +124,6 @@ target_include_directories(je_snapshot PRIVATE ${GEARMULATOR_SOURCE})
 target_link_libraries(je_snapshot PRIVATE jeLib synthLib baseLib)
 if(NOT APPLE)
     target_link_options(je_snapshot PRIVATE -static-libstdc++ -static-libgcc)
-endif()
-
-# ---- whine_compare diagnostic harness ----
-
-add_executable(whine_compare src/tools/whine_compare.cpp)
-target_include_directories(whine_compare PRIVATE ${GEARMULATOR_SOURCE})
-target_link_libraries(whine_compare PRIVATE jeLib synthLib baseLib)
-if(NOT APPLE)
-    target_link_options(whine_compare PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
 add_executable(audio_probe src/tools/audio_probe.cpp)
