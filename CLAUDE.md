@@ -98,6 +98,20 @@ Four stages pins every core and starves the host's own audio thread; the
 standalone bench never showed this because it had no host to starve. Three
 stages uses 55% of the block budget -- comfortable, not marginal.
 
+**The Pi's built-in audio is the latency floor, not the engine.** The bcm2835
+headphone driver pins the ALSA period at 884 frames (~10 ms at 88.2 kHz) --
+identical through `plughw` and `hw`, and unmoved by an explicit
+`snd_pcm_hw_params_set_period_size_near` request for 128. Two periods xrun
+(~10 per 14 s), three run clean, so **~30 ms is the floor on the onboard DAC**.
+The engine is nowhere near being the constraint: a 128-frame block renders in
+0.61 ms against a 1.45 ms budget. A class-compliant USB interface takes
+64-256 frame periods and is the fix for playing live.
+
+`snd_pcm_set_params` makes this worse by hiding it: given any latency under
+~20 ms it silently returns a buffer of exactly ONE period, so the card starves
+whenever the writer is running -- an identical 682 xruns at 10, 6 and 4 ms,
+which is what a misconfiguration looks like beside real jitter.
+
 **Benchmark on an IDLE box.** The same plugin measured 1.1x with Ardour running
 alongside and 1.8x without. Check `/proc/loadavg` first; several numbers taken
 this way had to be retracted.
