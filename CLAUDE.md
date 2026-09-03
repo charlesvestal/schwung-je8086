@@ -59,15 +59,25 @@ on Move" is a product claim that depends on machinery upstream is not getting.
 | pipeline, 3 stages | 2.58x fork / 2.62x thread | |
 | pipeline, 4 stages | 2.94x fork / 2.92x thread | 1.28x |
 
-Threads match fork at every depth. The Device column is lower for a reason
-worth knowing: **every sample crosses JeThread's semaphore ring**
-(`RingBuffer<SampleFrame,16384,true>`, Lock=true -> SpscSemaphoreWithCount)
-once on each side, and the producing side sits on the parent stage thread where
-the pipeline cannot remove it. The bench's parent stage costs 3.76 us/sample and
-Device adds ~4.7 us/sample of per-sample ring and bookkeeping, so 11.34/8.5
-predicts 1.33x against 1.28x measured. Batching that handoff is the next real
-win and would lift the serial number too -- on every platform, including the
-desktops where the pipeline itself is pointless.
+Threads match fork at every depth.
+
+**Time a render WITHOUT its boot, or the number is wrong.** A jp8000_render run
+carries ~1.0-1.4 s of fixed cost (snapshot load, JIT warm-up) and timing the
+whole process folds that into the rate: a 5 s render read 0.60x serial and 1.28x
+pipelined, which is what first suggested a large per-sample Device overhead and
+sent us looking for one. Subtracting the fixed cost by rendering 1 s and 9 s and
+taking the slope gives the real figures: **serial 0.76x, pipeline 2.26x, a 2.98x
+speedup** -- the same speedup the engine bench shows, so Device costs about 12%
+serial and is not hiding a bottleneck.
+
+**The audio ring is not worth batching.** `perf` on the serial render: 64% in
+[JIT] (the ESP-generated ASIC code), 32.5% in the binary (H8S interpreter,
+step(), runForCycles), **2.78% kernel**, 0.69% libc. Semaphores, syscalls and
+I/O together cannot exceed that 2.78%. `SpscSemaphoreWithCount` is a counted
+semaphore whose notify()/wait() are a single atomic unless a waiter is actually
+blocked, so a ring crossing costs tens of nanoseconds, not microseconds. An
+earlier note here claimed batching it was the next big win; that was inferred
+from the boot-inflated numbers above and is wrong.
 
 **The pipeline is what reaches real-time, and it does so on stock hardware.**
 Same Pi 4B @ 1.8 GHz, stock Debian 13, no Move-specific anything:
