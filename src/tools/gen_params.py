@@ -532,38 +532,70 @@ def level(label, keys, extra=None, knobs=None, lid=None):
 # nested (one collection here is 97 files across 30 folders) and a flat list of
 # 36 truncated paths is unreadable on 128 pixels. bank_folder/bank_in_folder are
 # served by the plugin and are mode-aware.
-BROWSE = dict(patch=("patch_banks", "patch_list", "patch", "Patch"),
-              performance=("perf_banks", "perf_list", "performance", "Performance"))
-levels = {
-    "patch": {"label": "Banks", "list_param": "bank_folder", "count_param": "bank_folder_count",
-              "name_param": "bank_folder_name", "children": "patch_banks", "knobs": MAIN_KNOBS, "params": []},
-    "patch_banks": {"label": "Bank", "list_param": "bank_in_folder", "count_param": "bank_in_folder_count",
-                    "name_param": "bank_in_folder_name", "children": "patch_list", "knobs": MAIN_KNOBS, "params": []},
-    "patch_list": {"label": "Patch", "list_param": "patch", "count_param": "patch_count",
-                   "name_param": "patch_name", "children": "patch_main", "knobs": MAIN_KNOBS, "params": []},
-    # No {"key": "bank"} row: the hierarchy above IS the bank chooser, and the
-    # flat enum lists every bank from every folder with only the basename, so
-    # two files with the same name in different folders read identically.
-    "patch_main": level("Patch", MAIN_KNOBS, lid="patch_main",
-                        extra=[{"level": lid, "label": lab} for lid, lab, _ in PATCH_LEVELS]),
-    "performance": {"label": "Banks", "list_param": "bank_folder", "count_param": "bank_folder_count",
-                    "name_param": "bank_folder_name", "children": "perf_banks", "knobs": MAIN_KNOBS, "params": []},
-    "perf_banks": {"label": "Bank", "list_param": "bank_in_folder", "count_param": "bank_in_folder_count",
-                   "name_param": "bank_in_folder_name", "children": "perf_list", "knobs": MAIN_KNOBS, "params": []},
-    "perf_list": {"label": "Performance", "list_param": "performance", "count_param": "performance_count",
-                  "name_param": "performance_name", "children": "perf_main", "knobs": MAIN_KNOBS, "params": []},
-    "perf_main": level("Performance", [], lid="perf_main", knobs=K("key_mode", "split_point", "part_detune", "voice_assign",
-                                                  "arp_switch", "arp_mode", "arp_beat", "tempo"),
-                       extra=[{"level": lid, "label": lab} for lid, lab, _ in PERF_LEVELS]),
-}
-# perf_main knobs must be present in its params
-levels["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
+# The browser is a HIERARCHY: folder -> bank -> preset. A real library is
+# nested (one collection here is 97 files across 30 folders) and a flat list of
+# 36 truncated paths is unreadable on 128 pixels.
+#
+# TWO shapes are emitted, and the plugin picks. With no sub-folders under
+# banks/ the folder level is a screen with exactly ONE row on it, sitting above
+# a screen whose title differs from it by a single letter ("Banks" over
+# "Bank"). That is the shape you get from dropping files straight in, which is
+# what everybody does first.
+#
+# The browser levels carry NO knobs. They used to carry MAIN_KNOBS, which made
+# the planner emit the Main knob page in the MIDDLE of the browse sequence --
+# folder list, then the eight knobs, then the bank list, then the presets. The
+# pages now run in the order the task does: pick the bank, pick the preset,
+# then edit what you loaded.
+def browse(label, list_p, count_p, name_p, child):
+    return {"label": label, "list_param": list_p, "count_param": count_p,
+            "name_param": name_p, "children": child, "params": []}
+
+def build_levels(nested):
+    lv = {}
+    if nested:
+        lv["patch"] = browse("Folder", "bank_folder", "bank_folder_count",
+                             "bank_folder_name", "patch_banks")
+        lv["patch_banks"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
+                                   "bank_in_folder_name", "patch_list")
+        lv["performance"] = browse("Folder", "bank_folder", "bank_folder_count",
+                                   "bank_folder_name", "perf_banks")
+        lv["perf_banks"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
+                                  "bank_in_folder_name", "perf_list")
+    else:
+        # The mode root IS the bank list; there is no folder to choose.
+        lv["patch"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
+                             "bank_in_folder_name", "patch_list")
+        lv["performance"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
+                                   "bank_in_folder_name", "perf_list")
+    # No {"key": "bank"} row anywhere: the walk above IS the bank chooser, and
+    # the flat enum lists every bank from every folder with only the basename,
+    # so two files with the same name in different folders read identically.
+    lv["patch_list"] = browse("Preset", "patch", "patch_count", "patch_name", "patch_main")
+    lv["perf_list"] = browse("Preset", "performance", "performance_count",
+                             "performance_name", "perf_main")
+    lv["patch_main"] = level("Patch", MAIN_KNOBS, lid="patch_main",
+                             extra=[{"level": lid, "label": lab} for lid, lab, _ in PATCH_LEVELS])
+    lv["perf_main"] = level("Performance", [], lid="perf_main",
+                            knobs=K("key_mode", "split_point", "part_detune", "voice_assign",
+                                    "arp_switch", "arp_mode", "arp_beat", "tempo"),
+                            extra=[{"level": lid, "label": lab} for lid, lab, _ in PERF_LEVELS])
+    return lv
+
+levels = build_levels(nested=True)
+def finish_levels(lv):
+    # perf_main knobs must be present in its params
+    lv["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
                                   "short_name": LEVEL_SHORT.get("perf_main", {}).get(k) or byKey[k]["short"]}
-                                 for k in levels["perf_main"]["knobs"]] + levels["perf_main"]["params"]
-levels["system"] = level("Setup", SYS_MAIN, lid="system",
+                                 for k in lv["perf_main"]["knobs"]] + lv["perf_main"]["params"]
+    lv["system"] = level("Setup", SYS_MAIN, lid="system",
                          extra=[{"level": lid, "label": lab} for lid, lab, _ in SYS_LEVELS])
-for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS:
-    levels[lid] = level(lab, keys, lid=lid)
+    for lid, lab, keys in PATCH_LEVELS + PERF_LEVELS + SYS_LEVELS:
+        lv[lid] = level(lab, keys, lid=lid)
+    return lv
+
+levels = finish_levels(levels)
+levels_flat = finish_levels(build_levels(nested=False))
 
 # A page that shows one word twice is ambiguous, and the contract cannot see it
 # -- only the rendered pixels can. Assert it here so the next regeneration
@@ -581,6 +613,7 @@ for _lid, _lvl in levels.items():
 assert not _dupes, "duplicate cell labels on a page: %s" % _dupes
 
 hierarchy = {"modes": ["patch", "performance", "system"], "mode_param": "mode", "levels": levels}
+hierarchy_flat = {"modes": ["patch", "performance", "system"], "mode_param": "mode", "levels": levels_flat}
 
 
 # panel_select is addressable but must not get its own chain_params row: the
@@ -770,6 +803,13 @@ lines.append("static const jp_param_t jp_params[JP_PARAM_COUNT] = {\n" + "\n".jo
 lines.append("/* chain_params JSON without its closing ']' — the plugin appends the bank enums. */")
 lines.append("static const char jp_chain_params_prefix[] =\n" + chunks(cp_prefix) + ";\n")
 hj = json.dumps(hierarchy, separators=(",", ":"))
+hjf = json.dumps(hierarchy_flat, separators=(",", ":"))
+lines.append("/* Two shapes. The plugin serves the FLAT one unless banks/ has")
+lines.append(" * sub-folders: with everything dropped in at the top, the folder level is")
+lines.append(" * a screen with one row on it, above a screen whose title differs by a")
+lines.append(" * single letter. */")
 lines.append("static const char jp_ui_hierarchy[] =\n" + chunks(hj) + ";\n")
+lines.append("static const char jp_ui_hierarchy_flat[] =\n" + chunks(hjf) + ";\n")
 open(OUT, "w").write("\n".join(lines))
-print("wrote", OUT, "-", len(params), "params, chain_params", len(cp_prefix), "B, hierarchy", len(hj), "B")
+print("wrote", OUT, "-", len(params), "params, chain_params", len(cp_prefix),
+      "B, hierarchy", len(hj), "B, flat", len(hjf), "B")

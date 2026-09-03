@@ -39,25 +39,6 @@
           ]
         },
         {
-          "title": "Banks",
-          "lines": [
-            "Drop extra patch or",
-            "performance banks in",
-            "the banks/ folder:",
-            "",
-            " .syx .j8k .mid",
-            " .pat .pfm",
-            "",
-            "They appear beside",
-            "Factory A/B in the",
-            "Bank and Perf Bank",
-            "menus.",
-            "",
-            "Sequence-only .mid",
-            "files give no bank."
-          ]
-        },
-        {
           "title": "CPU",
           "lines": [
             "The emulator runs as",
@@ -70,6 +51,56 @@
             "can run at a time."
           ]
         }
+      ]
+    },
+    {
+      "title": "Loading Banks",
+      "lines": [
+        "Drop preset files in",
+        "the module's banks/",
+        "folder (Schwung",
+        "Manager > Assets).",
+        "",
+        ".syx .mid .j8k .pat",
+        ".pfm all work. Where",
+        "a library ships both,",
+        "prefer .pat / .pfm --",
+        "they often carry more",
+        "(128 patches vs 64).",
+        "",
+        "Browse: Bank, then",
+        "Preset, then Patch.",
+        "Sub-folders add a",
+        "Folder step; with a",
+        "flat banks/ there is",
+        "none.",
+        "",
+        "PATCHES and",
+        "PERFORMANCES are",
+        "separate lists. A",
+        "patch file shows only",
+        "in Patch mode, a",
+        "performance file only",
+        "in Performance mode.",
+        "That is how the",
+        "hardware works.",
+        "",
+        "Loading a PATCH obeys",
+        "Edit Part on the",
+        "Patch page: Upper,",
+        "Lower or Both. So you",
+        "can take one sound",
+        "from a bank into just",
+        "the Lower part.",
+        "Loading a PERFORMANCE",
+        "always replaces both.",
+        "",
+        "A bank row reading",
+        "\"! N files ignored\"",
+        "means N files in",
+        "banks/ held no preset",
+        "data -- usually plain",
+        "MIDI songs."
       ]
     },
     {
