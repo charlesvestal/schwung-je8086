@@ -85,21 +85,29 @@ i.e. channel 16, still listening. `RemoteControlChannel` next door genuinely doe
 go to 17, which is what makes the two look interchangeable and neither of them
 is. Upstream bug; worth a PR.
 
-**Power-Up Mode is the one entry a module cannot honour**, and it is the only
-one left out on those grounds: the child boots from a snapshot and we then apply
-the slot's own state, so what the firmware would have loaded at power-on is
-overwritten before anyone can hear it.
+**Three entries govern hardware that cannot exist here, and are not exposed.**
+Power-Up Mode decides what the keyboard loads at power-on — the child boots from
+a snapshot and the slot's own state is applied over it, so the host has already
+answered. Local switches the internal keyboard into the engine, and
+**`KeyScanner::read()` returns 0 unconditionally with an empty `write()`** — the
+key matrix is a STUB, so that keyboard reports no keys pressed, forever.
+Keyboard Shift transposes the same stub (measured: a note on the remote channel
+is identical at -2, 0 and +2).
 
-Several others do nothing MEASURABLE through a slot today -- Keyboard Shift
-transposes the physical keyboard (a note on the remote channel is identical at
--2, 0 and +2), Local disconnects an internal keyboard we do not have, and the
-ribbon is a panel fader (`kFader_Ribbon1/2`) that nothing here can move.
-`jemiditypes.h` marks those three "(keyboard only)". **They are exposed anyway**:
-they are per-set, per-preset state that rides in the `sys` blob, and a setting
-that is latent is not a setting that is wrong. Gate Time Ratio was nearly cut on
-weaker evidence still -- the render that appeared to show it inert never
-established the arpeggiator was running, so it measured nothing. Being unable to
-observe a parameter is not the same as knowing it does nothing.
+**The ribbon is NOT in that category.** `Faders` is fully emulated,
+`setFader(which, value)` exists, and `kFader_Ribbon1/2` sit in its table beside
+pitch bend and the mod wheel — nothing calls it yet, which makes Ribbon
+Relative/Hold, and the forty `ctl_*` patch depths they scale, **latent rather
+than impossible**. Gate Time Ratio is kept on weaker grounds still: the render
+that appeared to show it inert never established the arpeggiator was running, so
+it measured nothing. Being unable to observe a parameter is not the same as
+knowing it does nothing — **a stub device is knowing.**
+
+**One setup page.** Ten parameters do not fit eight cells, so the split is where
+it costs least: the eight a slot can reach today stay together (channels and
+tuning on the top row, TxRx and gate on the bottom) and the two ribbon settings
+are the single dive. Three pages of two, three and four cells was the shape this
+replaced.
 
 **System settings are not in the temp performance, so they need their own state
 field.** `state_get` writes `"sys":"<hex>"` (version 2) holding one byte per
