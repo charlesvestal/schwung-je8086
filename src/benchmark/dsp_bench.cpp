@@ -8,6 +8,7 @@
  */
 
 #include <cstdio>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -36,7 +37,7 @@
 /* Optional raw dump (2nd arg): serial = float32 L/R interleaved, fork = je_audio_sample_t records. */
 static FILE* g_dump = nullptr;
 
-#if defined(BENCH_JE) || defined(BENCH_JE_FORK)
+#if defined(BENCH_JE) || defined(BENCH_JE_FORK) || defined(BENCH_JE_THREAD)
 #include "synthLib/midiTypes.h"
 #include <array>
 #include <string>
@@ -87,7 +88,7 @@ static void je_bench_phrase(int block, std::vector<synthLib::SMidiEvent>& midiIn
 }
 #endif
 
-#ifdef BENCH_JE_FORK
+#if defined(BENCH_JE_FORK) || defined(BENCH_JE_THREAD)
 #include "jeLib/device.h"
 #include "jeLib/je8086.h"
 #include "jeLib/je8086devices.h"
@@ -236,7 +237,7 @@ static int bench_je(const char* romDir) {
 #endif
 
 
-#ifdef BENCH_JE_FORK
+#if defined(BENCH_JE_FORK) || defined(BENCH_JE_THREAD)
 
 /* ---- SPSC ring helpers ---- */
 static inline int je_ring_avail(int w, int r) {
@@ -325,7 +326,13 @@ static void je_child_main(je_fork_shm_t *shm, int s, int core, jeLib::Je8086 &je
             st->samples_produced++;
         };
     } else {
+#ifdef BENCH_JE_THREAD
+        /* Shared MultiAsic: stage 0's dummy postSample would otherwise push
+         * into this same audio ring. Stage-scoped hook keeps one producer. */
+        jeLib::devices::g_je_stage_audio_out = [shm, st](int32_t left, int32_t right) {
+#else
         je.getAsics().setPostSample([shm, st](int32_t left, int32_t right) {
+#endif
             if (!je_spin_wait([shm] { return je_audio_avail(shm) < JE_RING_CAPACITY - 1; },
                               [shm] { return shm->child_shutdown != 0; },
                               &st->out_wait_ns)) return;
@@ -337,7 +344,11 @@ static void je_child_main(je_fork_shm_t *shm, int s, int core, jeLib::Je8086 &je
 #endif
             shm->audio_write = (shm->audio_write + 1) % (JE_RING_CAPACITY * 2);
             st->samples_produced++;
+#ifdef BENCH_JE_THREAD
+        };
+#else
         });
+#endif
     }
 
     st->ready = 1;
@@ -492,6 +503,13 @@ static int bench_je_fork(const char* romDir) {
     }
     jeLib::devices::g_je_split_asic = bounds[0];
 
+#ifdef BENCH_JE_THREAD
+    /* One address space: the rings are plain memory. Every stage steps a
+     * disjoint set of Asic objects, and the bounds and handoff callbacks are
+     * thread_local, so the stage loop below is the fork one unchanged. */
+    je_fork_shm_t *shm = new je_fork_shm_t();
+    memset(shm, 0, sizeof(*shm));
+#else
     je_fork_shm_t *shm = (je_fork_shm_t *)mmap(nullptr, sizeof(je_fork_shm_t),
         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (shm == MAP_FAILED) {
@@ -499,6 +517,7 @@ static int bench_je_fork(const char* romDir) {
         return 1;
     }
     memset(shm, 0, sizeof(*shm));
+#endif
     shm->num_stages = nbounds + 1;
     shm->stage[0].lo = 0; shm->stage[0].hi = bounds[0];
     for (int s = 1; s < shm->num_stages; s++) {
@@ -512,6 +531,14 @@ static int bench_je_fork(const char* romDir) {
         printf(", stage%d = ASIC%d..%d (core %d)", s, shm->stage[s].lo, shm->stage[s].hi - 1, cores[s]);
     printf("\n");
 
+#ifdef BENCH_JE_THREAD
+    std::thread stage_threads[JE_MAX_STAGES];
+    for (int s = 1; s < shm->num_stages; s++) {
+        jeLib::Je8086 &jeRef = device.getJe8086();
+        const int core = cores[s];
+        stage_threads[s] = std::thread([shm, s, core, &jeRef] { je_child_main(shm, s, core, jeRef); });
+    }
+#else
     pid_t pids[JE_MAX_STAGES] = {0};
     for (int s = 1; s < shm->num_stages; s++) {
         pid_t pid = fork();
@@ -527,6 +554,7 @@ static int bench_je_fork(const char* romDir) {
         }
         pids[s] = pid;
     }
+#endif
 
     je_pin_core(cores[0]);
 
@@ -534,6 +562,7 @@ static int bench_je_fork(const char* romDir) {
     for (int s = 1; s < shm->num_stages; s++) {
         for (int i = 0; i < 100 && !shm->stage[s].ready; i++) {
             usleep(100000);
+#ifndef BENCH_JE_THREAD
             int status;
             if (waitpid(pids[s], &status, WNOHANG) == pids[s]) {
                 fprintf(stderr, "Stage %d died during init (status=%d)\n", s, status);
@@ -541,12 +570,19 @@ static int bench_je_fork(const char* romDir) {
                 munmap(shm, sizeof(*shm));
                 return 1;
             }
+#endif
         }
         if (!shm->stage[s].ready) {
             fprintf(stderr, "Stage %d failed to start within 10s\n", s);
             shm->child_shutdown = 1;
+#ifdef BENCH_JE_THREAD
+            for (int k = 1; k < shm->num_stages; k++)
+                if (stage_threads[k].joinable()) stage_threads[k].join();
+            delete shm;
+#else
             for (int k = 1; k < shm->num_stages; k++) { kill(pids[k], SIGTERM); waitpid(pids[k], nullptr, 0); }
             munmap(shm, sizeof(*shm));
+#endif
             return 1;
         }
     }
@@ -649,6 +685,11 @@ static int bench_je_fork(const char* romDir) {
 
     /* Shutdown */
     shm->child_shutdown = 1;
+#ifdef BENCH_JE_THREAD
+    for (int s = 1; s < shm->num_stages; s++)
+        if (stage_threads[s].joinable()) stage_threads[s].join();
+    delete shm;
+#else
     for (int s = 1; s <= last; s++) {
         bool reaped = false;
         for (int i = 0; i < 30 && !reaped; i++) {
@@ -659,6 +700,7 @@ static int bench_je_fork(const char* romDir) {
         if (!reaped) { kill(pids[s], SIGKILL); waitpid(pids[s], nullptr, 0); }
     }
     munmap(shm, sizeof(*shm));
+#endif
     return 0;
 }
 #endif
@@ -681,7 +723,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef BENCH_JE
     return bench_je(argv[1]);
-#elif defined(BENCH_JE_FORK)
+#elif defined(BENCH_JE_FORK) || defined(BENCH_JE_THREAD)
     return bench_je_fork(argv[1]);
 #else
     fprintf(stderr, "No target defined\n");
