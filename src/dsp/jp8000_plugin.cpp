@@ -354,10 +354,6 @@ struct jp8000_shm_t {
      * indistinguishable from a broken browser -- in a real collection 41 of 97
      * files parse to nothing -- so the count is published for the UI to say. */
     int bank_files_skipped;
-    /* 1 = at least one bank came from a SUB-FOLDER of banks/. With everything
-     * dropped in at the top this is 0 and the folder level of the browser is a
-     * screen with one row on it, so the parent serves the flat hierarchy. */
-    int bank_has_folders;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     /* Folder each bank came from, "" for the top of banks/. The browser walks
      * folder -> bank -> preset. */
@@ -1038,7 +1034,10 @@ static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_ba
         for (size_t i = 0; i < list.size(); i++) {
             int dup = 1;
             for (size_t j = 0; j < i; j++) {
-                if (list[j].name != list[i].name || list[j].folder != list[i].folder) continue;
+                /* Name only, not (name, folder): the label no longer carries
+                 * the folder, so two files with the same name in different
+                 * folders would draw two identical rows. */
+                if (list[j].name != list[i].name) continue;
                 char suffix[8];
                 snprintf(suffix, sizeof(suffix), " %d", ++dup + 1);
                 std::string base = list[i].name;
@@ -1069,10 +1068,6 @@ static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_ba
         (*count)++;
     };
 
-    bool has_folders = false;
-    for (const auto &b : banks.patch) if (!b.folder.empty()) has_folders = true;
-    for (const auto &b : banks.perf)  if (!b.folder.empty()) has_folders = true;
-    shm->bank_has_folders = has_folders ? 1 : 0;
 
     publish(banks.patch, &shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes, shm->patch_bank_folders);
     publish(banks.perf, &shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes, shm->perf_bank_folders);
@@ -1940,7 +1935,7 @@ struct bank_view {
 static bank_view bank_view_for(jp8000_instance_t *inst) {
     jp8000_shm_t *shm = inst->shm;
     /* System mode browses nothing: it is a page of settings, not a bank of
-     * presets. Reporting count 0 makes every bank_folder/bank_in_folder key
+     * presets. Reporting count 0 makes every bank_list key
      * answer -1 rather than indexing the patch table by accident. */
     if (inst->mode == 2) return bank_view{0, shm->patch_bank_names, shm->patch_bank_folders, &inst->bank};
     if (inst->mode == 1)
@@ -1950,45 +1945,22 @@ static bank_view bank_view_for(jp8000_instance_t *inst) {
 
 /* Nth distinct folder, in order of first appearance. Returns nullptr past the
  * end; *out_count (when given) receives the number of distinct folders. */
-static const char *bank_folder_at(const bank_view &v, int want, int *out_count) {
-    int found = 0;
-    const char *hit = nullptr;
-    for (int i = 0; i < v.count; i++) {
-        bool seen = false;
-        for (int j = 0; j < i && !seen; j++)
-            if (strcmp(v.folders[j], v.folders[i]) == 0) seen = true;
-        if (seen) continue;
-        if (found == want) hit = v.folders[i];
-        found++;
-    }
-    if (out_count) *out_count = found;
-    return hit;
-}
-
-static int bank_folder_index(const bank_view &v, int bank) {
-    if (bank < 0 || bank >= v.count) return 0;
-    int idx = 0;
-    for (int i = 0; i < bank; i++) {
-        bool seen = false;
-        for (int j = 0; j < i && !seen; j++)
-            if (strcmp(v.folders[j], v.folders[i]) == 0) seen = true;
-        if (!seen && strcmp(v.folders[i], v.folders[bank]) != 0) idx++;
-    }
-    return idx;
+/* The bank list is FLAT: one row per file, labelled with the file name.
+ *
+ * A file IS a bank here -- you drop dumps into banks/ and each becomes one --
+ * so a folder step was a screen listing directories on the way to a screen
+ * listing the files in them, and with everything dropped in at the top it had
+ * exactly ONE row on it. Files in sub-folders are still found and still
+ * listed; they just do not carry the folder in the label. The only thing that
+ * survives from the old scheme is uniquify(), which numbers rows that would
+ * otherwise be two identical names -- not to say where a file came from, but
+ * so that two rows are never the same row. */
+static int bank_label(const bank_view &v, int idx, char *buf, int buf_len) {
+    if (idx < 0 || idx >= v.count) return -1;
+    return snprintf(buf, buf_len, "%s", v.names[idx]);
 }
 
 /* The Nth bank inside `folder`, and how many that folder holds. */
-static int bank_in_folder(const bank_view &v, const char *folder, int want, int *out_count) {
-    int found = 0, hit = -1;
-    for (int i = 0; i < v.count; i++) {
-        if (strcmp(v.folders[i], folder) != 0) continue;
-        if (found == want) hit = i;
-        found++;
-    }
-    if (out_count) *out_count = found;
-    return hit;
-}
-
 static void v2_set_param(void *instance, const char *key, const char *val) {
     jp8000_instance_t *inst = (jp8000_instance_t*)instance;
     if (!inst || !inst->shm || !key || !val) return;
@@ -2020,22 +1992,13 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (ps) param_write(inst, ps, inst->part);
         return;
     }
-    if (strcmp(key, "bank_folder") == 0 || strcmp(key, "bank_in_folder") == 0) {
+    if (strcmp(key, "bank_list") == 0) {
         const bank_view v = bank_view_for(inst);
         if (v.count <= 0) return;
-        const int sel = clampi(*v.sel, 0, v.count - 1);
-        const bool infolder = key[5] == 'i';
-        int target;
-        if (infolder) {
-            target = bank_in_folder(v, v.folders[sel], atoi(val), nullptr);
-        } else {
-            const char *f = bank_folder_at(v, atoi(val), nullptr);
-            target = f ? bank_in_folder(v, f, 0, nullptr) : -1;   /* first bank in it */
-        }
-        if (target < 0) return;
+        const int target = clampi(atoi(val), 0, v.count - 1);
         *v.sel = target;
-        if (inst->mode) { inst->perf_bank = target; shm->perf_bank_req = target; }
-        else            { inst->bank = target;      shm->patch_bank_req = target; }
+        if (inst->mode == 1) { inst->perf_bank = target; shm->perf_bank_req = target; }
+        else                 { inst->bank = target;      shm->patch_bank_req = target; }
         return;
     }
     if (strcmp(key, "bank") == 0) {
@@ -2124,11 +2087,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      * "not yet", and the UI redraws as they arrive.
      */
     if (strcmp(key, "ui_hierarchy") == 0)
-        /* Flat unless banks/ is actually nested. Decided from the child's
-         * scan, which has finished by the time the host reads the contract --
-         * and the host latches it, so this must not change afterwards. */
-        return snprintf(buf, buf_len, "%s",
-                        inst->shm->bank_has_folders ? jp_ui_hierarchy : jp_ui_hierarchy_flat);
+        return snprintf(buf, buf_len, "%s", jp_ui_hierarchy);
     if (strcmp(key, "state") == 0) return state_get(inst, buf, buf_len);
 
     /*
@@ -2172,58 +2131,24 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             if (ps && param_read(inst, ps, &v) == 0) return snprintf(buf, buf_len, "%d", v);
             return snprintf(buf, buf_len, "%d", inst->part);
         }
+        if (strncmp(key, "bank_list", 9) == 0) {
+            const bank_view v = bank_view_for(inst);
+            if (v.count <= 0) return v.count == 0 ? snprintf(buf, buf_len, "0") : -1;
+            const char *rest = key + 9;
+            if (!rest[0]) return snprintf(buf, buf_len, "%d", clampi(*v.sel, 0, v.count - 1));
+            if (strcmp(rest, "_count") == 0) return snprintf(buf, buf_len, "%d", v.count);
+            if (strncmp(rest, "_name", 5) == 0) {
+                const char *sfx = rest + 5;
+                const int want = sfx[0] == ':' ? atoi(sfx + 1)
+                                               : clampi(*v.sel, 0, v.count - 1);
+                return bank_label(v, want, buf, buf_len);
+            }
+            return -1;
+        }
         if (strcmp(key, "bank") == 0) return snprintf(buf, buf_len, "%d", inst->bank);
         if (strcmp(key, "perf_bank") == 0) return snprintf(buf, buf_len, "%d", inst->perf_bank);
         if (strcmp(key, "patch") == 0) return snprintf(buf, buf_len, "%d", inst->patch);
         if (strcmp(key, "performance") == 0) return snprintf(buf, buf_len, "%d", inst->performance);
-        /* Bank hierarchy: folder -> bank -> preset. Mode-aware, so Patch mode
-         * walks patch banks and Performance mode performance banks. */
-        if (strncmp(key, "bank_folder", 11) == 0 || strncmp(key, "bank_in_folder", 14) == 0) {
-            const bank_view v = bank_view_for(inst);
-            if (v.count <= 0) return -1;
-            const int sel = clampi(*v.sel, 0, v.count - 1);
-            const bool infolder = key[5] == 'i';
-            const char *rest = key + (infolder ? 14 : 11);
-            const char *cur_folder = v.folders[sel];
-            if (strcmp(rest, "_count") == 0) {
-                int n = 0;
-                if (infolder) bank_in_folder(v, cur_folder, -1, &n);
-                else bank_folder_at(v, -1, &n);
-                return snprintf(buf, buf_len, "%d", n);
-            }
-            if (strncmp(rest, "_name", 5) == 0) {
-                int idx = infolder ? bank_in_folder(v, cur_folder, -1, nullptr) : 0;
-                idx = infolder ? 0 : 0;
-                const char *sfx = rest + 5;
-                int want;
-                if (sfx[0] == ':') want = atoi(sfx + 1);
-                else if (!sfx[0]) want = infolder ? -2 : -2;   /* current */
-                else return -1;
-                if (want == -2) {
-                    if (infolder) return snprintf(buf, buf_len, "%s", v.names[sel]);
-                    return snprintf(buf, buf_len, "%s", cur_folder[0] ? cur_folder : "Banks");
-                }
-                if (infolder) {
-                    const int b = bank_in_folder(v, cur_folder, want, nullptr);
-                    if (b < 0) return -1;
-                    return snprintf(buf, buf_len, "%s", v.names[b]);
-                }
-                const char *f = bank_folder_at(v, want, nullptr);
-                if (!f) return -1;
-                return snprintf(buf, buf_len, "%s", f[0] ? f : "Banks");
-                (void)idx;
-            }
-            if (!rest[0]) {
-                if (infolder) {
-                    int pos = 0;
-                    for (int i = 0; i < sel; i++)
-                        if (strcmp(v.folders[i], cur_folder) == 0) pos++;
-                    return snprintf(buf, buf_len, "%d", pos);
-                }
-                return snprintf(buf, buf_len, "%d", bank_folder_index(v, sel));
-            }
-            return -1;
-        }
         if (strcmp(key, "__midi_trace") == 0) {
             if (!inst->trace) return snprintf(buf, buf_len, "(not armed)");
             const unsigned w = inst->trace_w;
