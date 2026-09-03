@@ -122,6 +122,7 @@ enum {
 };
 /* Temp performance layout (packed addresses, jemiditypes.h PerformanceData) */
 #define JP_ADDR_TEMP        0x01000000u
+#define JP_ADDR_SYSTEM      0x00000000u  /* jeLib::AddressArea::System */
 #define JP_TEMP_COMMON      0x0000u
 #define JP_TEMP_PART_UP     0x1000u
 #define JP_TEMP_PART_LO     0x1100u
@@ -662,6 +663,14 @@ static uint8_t *img_for(jp8000_shm_t *shm, int area, int part, uint32_t *block, 
     case JP_AREA_PART_LO:
         *block = JP_TEMP_PART_LO; *valid_bit = IMG_PART_LO; *cap = JP_PART_LEN;
         return shm->img_part[1];
+    case JP_AREA_SYSTEM:
+        /* The system area is not inside the temp performance -- it has its own
+         * top-level address (0x00000000), so `block` is 0 here and the writer
+         * below picks the base off the area rather than assuming TEMP. The
+         * image itself was already being filled from DT1 replies; nothing
+         * could address it. */
+        *block = 0u; *valid_bit = IMG_SYSTEM; *cap = (int)sizeof(shm->img_system);
+        return shm->img_system;
     default:
         *block = JP_TEMP_COMMON; *valid_bit = IMG_COMMON; *cap = JP_COMMON_LEN;
         return shm->img_common;
@@ -754,7 +763,7 @@ struct jp8000_instance_t {
 
     /* UI state, parent-only. `mode` is a UI fact (which browser is shown);
      * the synth has no such switch. */
-    int mode;         /* 0 patch, 1 performance */
+    int mode;         /* 0 patch, 1 performance, 2 system */
     int part;         /* 0 upper, 1 lower, 2 both — which patch knob edits address */
     int bank;         /* index into patch banks */
     int patch;        /* index within `bank` */
@@ -876,10 +885,22 @@ static void child_drain_midi_out(jp8000_shm_t *shm, jeLib::Je8086 &je, std::vect
 }
 
 static void child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
+    /* Off unless armed. This is the child process, which is not the SPI
+     * callback, so a printf here is allowed -- and it is the only place the
+     * bytes we hand the firmware can be read. A parameter write's read-back
+     * comes from our own image, so without this the image and the emulator
+     * can disagree and nothing says so. */
+    static const bool trace = getenv("JP_SYSEX_LOG") != nullptr;
     uint8_t m[JP_SX_MAX_MSG];
     int len;
-    while ((len = sx_ring_pop(shm, m, sizeof(m))) > 0)
+    while ((len = sx_ring_pop(shm, m, sizeof(m))) > 0) {
+        if (trace) {
+            fprintf(stderr, "[jp sysex-out %2d]", len);
+            for (int i = 0; i < len; i++) fprintf(stderr, " %02X", m[i]);
+            fprintf(stderr, "\n");
+        }
         child_send_sysex(je, m, len);
+    }
 }
 
 /* System settings the editor needs, sent once at boot (what the JUCE
@@ -929,7 +950,14 @@ static void child_boot_force_system(jeLib::Je8086 &je) {
     child_send_dump(je, State::createParameterChange(SystemParameter::KeyboardShift, 2));
     child_send_dump(je, State::createParameterChange(SystemParameter::TxRxProgramChangeSwitch, 2));
     child_send_dump(je, State::createParameterChange(SystemParameter::RemoteControlChannel, 2));
-    child_send_dump(je, State::createParameterChange(SystemParameter::PerformanceControlChannel, 0x11));
+    /* 16, not upstream's 0x11. The firmware accepts 0..16 for this one (16 =
+     * Off) and REJECTS anything above, so jeController's `sendChange(0x11); //
+     * off` never turned it off -- it left the factory default 15, i.e. channel
+     * 16, still listening. Measured by writing each value and reading the
+     * firmware's own system dump back: 16 -> 0x10, 17 -> 0x0F, 99 -> 0x0F.
+     * RemoteControlChannel next door genuinely does go to 17, which is what
+     * makes the two look interchangeable and neither of them is. */
+    child_send_dump(je, State::createParameterChange(SystemParameter::PerformanceControlChannel, 16));
     child_send_dump(je, State::createSystemRequest());
     child_request_temp(je);
 }
@@ -1680,7 +1708,8 @@ static void param_write_block(jp8000_shm_t *shm, const jp_param_t *p, int part, 
     else { data[0] = raw & 0x7f; n = 1; }
     memcpy(img + p->lin, data, n);
     uint8_t m[16];
-    const int len = dt1_build(m, JP_ADDR_TEMP | block | jpbank::linear_to_packed(p->lin), data, n);
+    const uint32_t base = (p->area == JP_AREA_SYSTEM) ? JP_ADDR_SYSTEM : JP_ADDR_TEMP;
+    const int len = dt1_build(m, base | block | jpbank::linear_to_packed(p->lin), data, n);
     sx_ring_push(shm, m, len);
 }
 
@@ -1708,6 +1737,7 @@ static void request_load(jp8000_instance_t *inst, int kind) {
  * everything else. */
 static int parse_mode(const char *val) {
     if (strcasecmp(val, "performance") == 0 || strcmp(val, "1") == 0) return 1;
+    if (strcasecmp(val, "system") == 0 || strcmp(val, "2") == 0) return 2;
     if (strcasecmp(val, "patch") == 0 || strcmp(val, "0") == 0) return 0;
     return -1;
 }
@@ -1749,7 +1779,7 @@ static int state_get(jp8000_instance_t *inst, char *buf, int buf_len) {
     jp8000_shm_t *shm = inst->shm;
     if (!inst->ui_ready || (shm->img_valid & IMG_ALL_TEMP) != IMG_ALL_TEMP) return -1;
     int n = snprintf(buf, buf_len,
-        "{\"version\":1,\"mode\":%d,\"part\":%d,\"bank\":%d,\"patch\":%d,\"perf_bank\":%d,\"performance\":%d,\"temp\":\"",
+        "{\"version\":2,\"mode\":%d,\"part\":%d,\"bank\":%d,\"patch\":%d,\"perf_bank\":%d,\"performance\":%d,\"temp\":\"",
         inst->mode, inst->part, inst->bank, inst->patch, inst->perf_bank, inst->performance);
     if (n >= buf_len - (JP_TEMP_TOTAL_LEN * 2 + 3)) return -1;
     static const char hexd[] = "0123456789abcdef";
@@ -1762,7 +1792,33 @@ static int state_get(jp8000_instance_t *inst, char *buf, int buf_len) {
             buf[n++] = hexd[img[k] & 15];
         }
     }
-    buf[n++] = '"'; buf[n++] = '}'; buf[n] = 0;
+    buf[n++] = '"';
+    /* System settings ride along as their own field, not inside "temp".
+     * They are not part of the temp performance -- a patch cannot carry
+     * them -- so without this a slot forgets its Remote Ctrl Ch and its
+     * master tune on every reload, back to whatever we force at boot.
+     *
+     * Only the parameters we EXPOSE are stored, one byte each in table
+     * order, and restored as individual DT1s. The firmware's own dump of
+     * this area starts with PerformanceBank and PerformanceNumber, so
+     * replaying it wholesale would also change the loaded performance --
+     * a restore that quietly reloads the preset is not a restore. */
+    if (shm->img_valid & IMG_SYSTEM) {
+        int cnt = 0;
+        for (int i = 0; i < JP_PARAM_COUNT; i++)
+            if (jp_params[i].area == JP_AREA_SYSTEM) cnt++;
+        if (n + cnt * 2 + 12 < buf_len) {
+            n += snprintf(buf + n, buf_len - n, ",\"sys\":\"");
+            for (int i = 0; i < JP_PARAM_COUNT; i++) {
+                if (jp_params[i].area != JP_AREA_SYSTEM) continue;
+                const uint8_t b = shm->img_system[jp_params[i].lin];
+                buf[n++] = hexd[b >> 4];
+                buf[n++] = hexd[b & 15];
+            }
+            buf[n++] = '"';
+        }
+    }
+    buf[n++] = '}'; buf[n] = 0;
     return n;
 }
 
@@ -1771,7 +1827,7 @@ static int state_get(jp8000_instance_t *inst, char *buf, int buf_len) {
 static void state_apply(jp8000_instance_t *inst, const char *s) {
     jp8000_shm_t *shm = inst->shm;
     int v;
-    if ((v = json_int_field(s, "mode", -1)) >= 0) inst->mode = clampi(v, 0, 1);
+    if ((v = json_int_field(s, "mode", -1)) >= 0) inst->mode = clampi(v, 0, 2);
     if ((v = json_int_field(s, "part", -1)) >= 0) inst->part = clampi(v, 0, 2);
     if ((v = json_int_field(s, "bank", -1)) >= 0) inst->bank = v;
     if ((v = json_int_field(s, "patch", -1)) >= 0) inst->patch = clampi(v, 0, JP_MAX_PRESETS - 1);
@@ -1781,6 +1837,36 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
     if (shm->perf_bank_count > 0) inst->perf_bank = clampi(inst->perf_bank, 0, shm->perf_bank_count - 1);
     shm->patch_bank_req = inst->bank;
     shm->perf_bank_req = inst->perf_bank;
+
+    /* Before "temp", because a malformed temp block returns early and the
+     * system settings are independent of it. */
+    const char *sy = strstr(s, "\"sys\":\"");
+    if (sy) {
+        sy += 7;
+        int cnt = 0;
+        for (int i = 0; i < JP_PARAM_COUNT; i++)
+            if (jp_params[i].area == JP_AREA_SYSTEM) cnt++;
+        /* A blob written by a build with a different set of system params
+         * is not decodable positionally -- skip it rather than write the
+         * wrong byte to the wrong address. */
+        int k = 0;
+        while (k < cnt * 2 && hexval(sy[k]) >= 0) k++;
+        if (k == cnt * 2 && sy[k] == '"') {
+            int j = 0;
+            for (int i = 0; i < JP_PARAM_COUNT; i++) {
+                if (jp_params[i].area != JP_AREA_SYSTEM) continue;
+                const int raw = (hexval(sy[j * 2]) << 4) | hexval(sy[j * 2 + 1]);
+                j++;
+                if (jp_params[i].lin >= (int)sizeof(shm->img_system)) continue;
+                shm->img_system[jp_params[i].lin] = (uint8_t)raw;
+                uint8_t m[JP_SX_MAX_MSG];
+                const uint8_t d = (uint8_t)(raw & 0x7f);
+                const int mlen = dt1_build(m, JP_ADDR_SYSTEM | jpbank::linear_to_packed(jp_params[i].lin), &d, 1);
+                sx_ring_push(shm, m, mlen);
+            }
+            shm->img_valid |= IMG_SYSTEM;
+        }
+    }
 
     const char *t = strstr(s, "\"temp\":\"");
     if (!t) return;
@@ -1825,7 +1911,11 @@ struct bank_view {
 
 static bank_view bank_view_for(jp8000_instance_t *inst) {
     jp8000_shm_t *shm = inst->shm;
-    if (inst->mode)
+    /* System mode browses nothing: it is a page of settings, not a bank of
+     * presets. Reporting count 0 makes every bank_folder/bank_in_folder key
+     * answer -1 rather than indexing the patch table by accident. */
+    if (inst->mode == 2) return bank_view{0, shm->patch_bank_names, shm->patch_bank_folders, &inst->bank};
+    if (inst->mode == 1)
         return bank_view{shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_folders, &inst->perf_bank};
     return bank_view{shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_folders, &inst->bank};
 }
@@ -2039,7 +2129,9 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
          * "0": a default here would plan a page and latch. */
         if (strcmp(key, "__status") != 0) return -1;
     } else {
-        if (strcmp(key, "mode") == 0) return snprintf(buf, buf_len, "%s", inst->mode ? "Performance" : "Patch");
+        if (strcmp(key, "mode") == 0)
+            return snprintf(buf, buf_len, "%s",
+                            inst->mode == 2 ? "System" : inst->mode ? "Performance" : "Patch");
         if (strcmp(key, "part") == 0) {
             /* Prefer the device's own Panel Select; inst->part is the fallback
              * while the image is still filling. */

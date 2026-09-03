@@ -55,6 +55,56 @@ are rejected at load; the plugin then falls back to scratch boot (~30–60 s).
 - On device, put all test artifacts in `/data/UserData/jp8000_test/`
   (NEVER /tmp — the root fs is ~474 MB and nearly full).
 
+## The System area
+
+A third mode, beside Patch and Performance. It is not a page under Performance:
+on the hardware you leave the performance to reach it (SHIFT/EXIT), and what you
+set there outlives the patch. Thirteen keyboard parameters — the pattern/motion
+sequencer settings and the rack-only tail are skipped.
+
+**It is the one group whose writes do not carry the temp base.** Every other
+parameter lives inside the temp performance at `0x01000000`; the system area is
+`0x00000000` (`jeLib::AddressArea::System`, with `SystemArea::SystemParameter`
+adding nothing), so `param_write_block` picks the base off `p->area`. The image
+was already being filled from the firmware's DT1 replies (`img_system`,
+`IMG_SYSTEM`) long before anything could address it — reads worked, writes had
+nowhere to go.
+
+**A parameter read-back proves nothing about the firmware.** `param_write_block`
+writes our image first and the DT1 second, so a get returns what we just stored
+whether or not the emulator accepted it. `JP_SYSEX_LOG=1` prints the bytes we
+actually hand the firmware (in the child, which is not the SPI callback) — that
+plus a `sysreq` in `jp8000_render` is the only way to see both halves.
+
+**Every range here was measured, not read off a header.** The firmware silently
+REJECTS an out-of-range write and keeps what it had, so an accepted write is the
+only proof of a range. `PerformanceControlChannel` is the one that matters:
+it accepts 0..16 (16 = Off) and rejects 17, so jeController's
+`sendChange(0x11); // off` never turned it off — it left the factory default 15,
+i.e. channel 16, still listening. `RemoteControlChannel` next door genuinely does
+go to 17, which is what makes the two look interchangeable and neither of them
+is. Upstream bug; worth a PR.
+
+**System settings are not in the temp performance, so they need their own state
+field.** `state_get` writes `"sys":"<hex>"` (version 2) holding one byte per
+EXPOSED system parameter in table order, and `state_apply` replays them as
+individual DT1s. Not the firmware's own 23-byte dump: that starts with
+`PerformanceBank` and `PerformanceNumber`, so replaying it wholesale would also
+reload the preset. A blob whose `sys` length disagrees with the current parameter
+count is skipped rather than decoded positionally into the wrong addresses.
+
+**`jp8000_render` fires every scripted sysex at t=0**, whatever time the script
+line names. Three separate readings of "did this write land" came out of that,
+because a value written at 3.0 s appeared in a dump logged at 0.247 s. Note-level
+events are scheduled; sysex is not.
+
+**The System pages are a knob grid, not a menu.** They were built expecting to
+need `LAYOUT_LIST` — set-once settings with long words — and rendering them
+(`preview.mjs jp8000 --mode system --layout movy`) says otherwise: four pages,
+nothing paginated, nothing wrapped, two-option settings drawn as switches. A
+per-level layout pin is a host feature and is still not built; nothing here needs
+it.
+
 ## Building
 
 ```bash

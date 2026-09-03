@@ -12,12 +12,14 @@
         "Home of the SuperSaw.",
         "8-voice polyphony.",
         "",
-        "Two modes:",
+        "Three modes:",
         " Patch: one sound,",
         "  Upper/Lower/Both",
         " Performance: two",
         "  parts, split or",
-        "  layer, arpeggiator"
+        "  layer, arpeggiator",
+        " System: MIDI and",
+        "  keyboard settings"
       ]
     },
     {
@@ -111,6 +113,46 @@
         "Upper/Lower set",
         "each part's patch,",
         "level, pan, channel."
+      ]
+    },
+    {
+      "title": "System Mode",
+      "lines": [
+        "Global settings that",
+        "outlive the patch --",
+        "the synth's own",
+        "SHIFT/EXIT page.",
+        "",
+        "Main:",
+        " Remote Ctrl Ch is",
+        "  the note path the",
+        "  ARPEGGIATOR hears.",
+        "  Default 3. Change",
+        "  it and the arp",
+        "  goes quiet.",
+        " Perf Ctrl Ch is",
+        "  Off by default.",
+        " Local, MIDI Sync.",
+        "",
+        "TxRx: whether CC",
+        " edits and program",
+        " changes are sent",
+        " and received.",
+        "",
+        "Keyboard: Master",
+        " Tune (50 = A440),",
+        " octave Shift, Gate",
+        " Time, Power-Up.",
+        "",
+        "Ribbon: Relative",
+        " and Hold.",
+        "",
+        "These are NOT saved",
+        "in a patch. They are",
+        "part of the slot",
+        "state, so a preset",
+        "or a snapshot keeps",
+        "them."
       ]
     },
     {
