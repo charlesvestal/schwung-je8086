@@ -57,18 +57,22 @@ are rejected at load; the plugin then falls back to scratch boot (~30–60 s).
 
 ## Loading banks
 
-**The browser serves TWO hierarchy shapes and the plugin picks.** With no
-sub-folders under `banks/` the folder level is a screen with exactly ONE row on
-it, sitting above a screen whose title differs from it by a single letter
-("Banks" over "Bank") -- and that is the shape you get from dropping files
-straight in, which is what everybody does first. `jp_ui_hierarchy_flat` drops
-the level; `bank_has_folders` from the child's scan decides. The host LATCHES
-the contract, so this must not change after load.
+**The bank list is FLAT, and there is no folder level.** A file IS a bank here
+-- you drop dumps into `banks/` and each becomes one -- so a folder step was a
+screen listing directories on the way to a screen listing the files in them, and
+with everything dropped in at the top it had exactly ONE row on it, titled
+"Banks", above a screen titled "Bank". `bank_list` / `bank_list_count` /
+`bank_list_name` is one mode-aware list over every bank. Files in sub-folders are
+still found and still listed, by their own name: the folder is not in the label,
+because it is not information the user asked for. What survives from the folder
+scheme is `uniquify()`, now keyed on the NAME ALONE -- with the folder gone from
+the label, two same-named files in different folders would otherwise draw two
+identical rows.
 
 **The browser levels carry no knobs.** They used to carry `MAIN_KNOBS`, which
 made the planner emit the Main knob page in the MIDDLE of the browse sequence:
-folder list, eight knobs, bank list, presets. The pages now run in the order the
-task does -- `BANK > PRESET > PATCH > sections`.
+bank list, eight knobs, preset list. The pages now run in the order the task
+does -- `BANK > PRESET > PATCH > sections`.
 
 **A repeated header block is a new preset.** Not every dump advances the
 destination slot: "The Usual Suspects" holds 32 distinctly named performances

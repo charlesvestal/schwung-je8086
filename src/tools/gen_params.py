@@ -551,26 +551,23 @@ def browse(label, list_p, count_p, name_p, child):
     return {"label": label, "list_param": list_p, "count_param": count_p,
             "name_param": name_p, "children": child, "params": []}
 
-def build_levels(nested):
+def build_levels():
+    """Bank, then Preset, then the sound. Two steps, no folder step.
+
+    A file IS a bank here -- you drop dumps into banks/ and each becomes one --
+    so a folder level was a screen listing directories on the way to a screen
+    listing the files in them, and with a flat banks/ it had exactly ONE row on
+    it. `bank_list` is flat and mode-aware, and its labels carry the folder
+    where there is one, trimmed from the left, so two same-named files in
+    different folders still read apart.
+
+    The browser levels carry NO knobs. They used to carry MAIN_KNOBS, which made
+    the planner emit the Main knob page in the MIDDLE of browsing -- bank list,
+    eight knobs, preset list. The pages now run in the order the task does.
+    """
     lv = {}
-    if nested:
-        lv["patch"] = browse("Folder", "bank_folder", "bank_folder_count",
-                             "bank_folder_name", "patch_banks")
-        lv["patch_banks"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
-                                   "bank_in_folder_name", "patch_list")
-        lv["performance"] = browse("Folder", "bank_folder", "bank_folder_count",
-                                   "bank_folder_name", "perf_banks")
-        lv["perf_banks"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
-                                  "bank_in_folder_name", "perf_list")
-    else:
-        # The mode root IS the bank list; there is no folder to choose.
-        lv["patch"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
-                             "bank_in_folder_name", "patch_list")
-        lv["performance"] = browse("Bank", "bank_in_folder", "bank_in_folder_count",
-                                   "bank_in_folder_name", "perf_list")
-    # No {"key": "bank"} row anywhere: the walk above IS the bank chooser, and
-    # the flat enum lists every bank from every folder with only the basename,
-    # so two files with the same name in different folders read identically.
+    lv["patch"] = browse("Bank", "bank_list", "bank_list_count", "bank_list_name", "patch_list")
+    lv["performance"] = browse("Bank", "bank_list", "bank_list_count", "bank_list_name", "perf_list")
     lv["patch_list"] = browse("Preset", "patch", "patch_count", "patch_name", "patch_main")
     lv["perf_list"] = browse("Preset", "performance", "performance_count",
                              "performance_name", "perf_main")
@@ -582,7 +579,7 @@ def build_levels(nested):
                             extra=[{"level": lid, "label": lab} for lid, lab, _ in PERF_LEVELS])
     return lv
 
-levels = build_levels(nested=True)
+levels = build_levels()
 def finish_levels(lv):
     # perf_main knobs must be present in its params
     lv["perf_main"]["params"] = [{"key": k, "label": byKey[k]["name"],
@@ -595,7 +592,6 @@ def finish_levels(lv):
     return lv
 
 levels = finish_levels(levels)
-levels_flat = finish_levels(build_levels(nested=False))
 
 # A page that shows one word twice is ambiguous, and the contract cannot see it
 # -- only the rendered pixels can. Assert it here so the next regeneration
@@ -613,7 +609,6 @@ for _lid, _lvl in levels.items():
 assert not _dupes, "duplicate cell labels on a page: %s" % _dupes
 
 hierarchy = {"modes": ["patch", "performance", "system"], "mode_param": "mode", "levels": levels}
-hierarchy_flat = {"modes": ["patch", "performance", "system"], "mode_param": "mode", "levels": levels_flat}
 
 
 # panel_select is addressable but must not get its own chain_params row: the
@@ -803,13 +798,6 @@ lines.append("static const jp_param_t jp_params[JP_PARAM_COUNT] = {\n" + "\n".jo
 lines.append("/* chain_params JSON without its closing ']' — the plugin appends the bank enums. */")
 lines.append("static const char jp_chain_params_prefix[] =\n" + chunks(cp_prefix) + ";\n")
 hj = json.dumps(hierarchy, separators=(",", ":"))
-hjf = json.dumps(hierarchy_flat, separators=(",", ":"))
-lines.append("/* Two shapes. The plugin serves the FLAT one unless banks/ has")
-lines.append(" * sub-folders: with everything dropped in at the top, the folder level is")
-lines.append(" * a screen with one row on it, above a screen whose title differs by a")
-lines.append(" * single letter. */")
 lines.append("static const char jp_ui_hierarchy[] =\n" + chunks(hj) + ";\n")
-lines.append("static const char jp_ui_hierarchy_flat[] =\n" + chunks(hjf) + ";\n")
 open(OUT, "w").write("\n".join(lines))
-print("wrote", OUT, "-", len(params), "params, chain_params", len(cp_prefix),
-      "B, hierarchy", len(hj), "B, flat", len(hjf), "B")
+print("wrote", OUT, "-", len(params), "params, chain_params", len(cp_prefix), "B, hierarchy", len(hj), "B")
