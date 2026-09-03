@@ -8,34 +8,92 @@
     "dsp": "dsp.so",
     "api_version": 2,
     "standalone": false,
-    "assets": {
-        "path": "roms",
-        "label": "ROMs",
-        "extensions": [
-            ".mid",
-            ".bin"
-        ],
-        "description": "Requires the original JP-8000 ROM files (.mid firmware dump). Place all 8 .mid files from the v1.5 firmware in the roms/ folder.",
-        "hint": "The emulator runs as three pipelined stages on cores 0-2, off the audio core. Only one JE-8086 can run at a time.",
-        "hint_url": "https://github.com/charlesvestal/schwung-jp8000",
-        "hint_url_label": "Read more",
-        "folders": [
-            {
-                "path": "banks",
-                "label": "Banks",
-                "description": "Extra patch / performance banks (SysEx dumps, .j8k, .mid bulk dumps, .pat/.pfm), listed beside Factory A/B",
-                "extensions": [
-                    ".syx",
-                    ".j8k",
-                    ".mid",
-                    ".MID",
-                    ".pat",
-                    ".pfm"
-                ],
-                "required": false
-            }
-        ]
-    },
+    "assets": [
+        {
+            "path": "roms",
+            "label": "ROMs",
+            "extensions": [
+                ".mid"
+            ],
+            "description": "Requires the 8 .mid files of a JP-8000 v1.5 firmware bulk dump, 79,372 bytes each. A Roland dump names them _00001.mid to _00008.mid; the loader finds them by size, so other names still work but cannot be verified here.",
+            "hint": "The emulator runs as three pipelined stages on cores 0-2, off the audio core. Only one JE-8086 can run at a time.",
+            "hint_url": "https://github.com/charlesvestal/schwung-jp8000",
+            "hint_url_label": "Read more",
+            "files": [
+                {
+                    "filename": "_00001.mid",
+                    "label": "Firmware 1 of 8",
+                    "size": 79372,
+                    "crc32": "3DB23BE1",
+                    "required": true
+                },
+                {
+                    "filename": "_00002.mid",
+                    "label": "Firmware 2 of 8",
+                    "size": 79372,
+                    "crc32": "EA24A770",
+                    "required": true
+                },
+                {
+                    "filename": "_00003.mid",
+                    "label": "Firmware 3 of 8",
+                    "size": 79372,
+                    "crc32": "D82A058D",
+                    "required": true
+                },
+                {
+                    "filename": "_00004.mid",
+                    "label": "Firmware 4 of 8",
+                    "size": 79372,
+                    "crc32": "B552CF94",
+                    "required": true
+                },
+                {
+                    "filename": "_00005.mid",
+                    "label": "Firmware 5 of 8",
+                    "size": 79372,
+                    "crc32": "DD568E7D",
+                    "required": true
+                },
+                {
+                    "filename": "_00006.mid",
+                    "label": "Firmware 6 of 8",
+                    "size": 79372,
+                    "crc32": "B8323722",
+                    "required": true
+                },
+                {
+                    "filename": "_00007.mid",
+                    "label": "Firmware 7 of 8",
+                    "size": 79372,
+                    "crc32": "11DAAB09",
+                    "required": true
+                },
+                {
+                    "filename": "_00008.mid",
+                    "label": "Firmware 8 of 8",
+                    "size": 79372,
+                    "crc32": "440A3458",
+                    "required": true
+                }
+            ]
+        },
+        {
+            "path": "banks",
+            "label": "Banks",
+            "extensions": [
+                ".syx",
+                ".j8k",
+                ".mid",
+                ".MID",
+                ".pat",
+                ".pfm"
+            ],
+            "description": "Extra patch and performance banks. Nested folders are scanned, and each file becomes a bank in the browser beside Factory A/B.",
+            "optional": true,
+            "allowFolders": true
+        }
+    ],
     "capabilities": {
         "audio_out": true,
         "audio_in": false,
@@ -47,16 +105,108 @@
     },
     "_chain_params_note": "Fallback only. The live contract (169 params + bank enums) is served by get_param('chain_params') in dsp/jp8000_plugin.cpp, generated from tools/gen_params.py into dsp/jp8000_params.h. Keys and ranges here mirror the patch_main knobs.",
     "chain_params": [
-        {"key": "mode", "name": "Mode", "type": "enum", "options": ["Patch", "Performance"], "default": 0},
-        {"key": "part", "name": "Edit Part", "short_name": "Part", "type": "enum", "options": ["Upper", "Lower", "Both"], "default": 0},
-        {"key": "cutoff", "name": "Cutoff", "short_name": "Cut", "type": "int", "min": 0, "max": 127, "default": 127},
-        {"key": "resonance", "name": "Resonance", "short_name": "Res", "type": "int", "min": 0, "max": 127, "default": 0},
-        {"key": "filter_env_depth", "name": "Filter Env", "short_name": "Env", "type": "int", "min": -64, "max": 63, "default": 0},
-        {"key": "amp_attack", "name": "Amp Attack", "short_name": "Atk", "type": "int", "min": 0, "max": 127, "default": 0},
-        {"key": "amp_decay", "name": "Amp Decay", "short_name": "Dcy", "type": "int", "min": 0, "max": 127, "default": 64},
-        {"key": "amp_sustain", "name": "Amp Sustain", "short_name": "Sus", "type": "int", "min": 0, "max": 127, "default": 127},
-        {"key": "amp_release", "name": "Amp Release", "short_name": "Rel", "type": "int", "min": 0, "max": 127, "default": 0},
-        {"key": "delay_level", "name": "Delay Level", "short_name": "Delay", "type": "int", "min": 0, "max": 127, "default": 0},
-        {"key": "amp_level", "name": "Amp Level", "short_name": "Level", "type": "int", "min": 0, "max": 127, "default": 127}
+        {
+            "key": "mode",
+            "name": "Mode",
+            "type": "enum",
+            "options": [
+                "Patch",
+                "Performance"
+            ],
+            "default": 0
+        },
+        {
+            "key": "part",
+            "name": "Edit Part",
+            "short_name": "Part",
+            "type": "enum",
+            "options": [
+                "Upper",
+                "Lower",
+                "Both"
+            ],
+            "default": 0
+        },
+        {
+            "key": "cutoff",
+            "name": "Cutoff",
+            "short_name": "Cut",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 127
+        },
+        {
+            "key": "resonance",
+            "name": "Resonance",
+            "short_name": "Res",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 0
+        },
+        {
+            "key": "filter_env_depth",
+            "name": "Filter Env",
+            "short_name": "Env",
+            "type": "int",
+            "min": -64,
+            "max": 63,
+            "default": 0
+        },
+        {
+            "key": "amp_attack",
+            "name": "Amp Attack",
+            "short_name": "Atk",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 0
+        },
+        {
+            "key": "amp_decay",
+            "name": "Amp Decay",
+            "short_name": "Dcy",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 64
+        },
+        {
+            "key": "amp_sustain",
+            "name": "Amp Sustain",
+            "short_name": "Sus",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 127
+        },
+        {
+            "key": "amp_release",
+            "name": "Amp Release",
+            "short_name": "Rel",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 0
+        },
+        {
+            "key": "delay_level",
+            "name": "Delay Level",
+            "short_name": "Delay",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 0
+        },
+        {
+            "key": "amp_level",
+            "name": "Amp Level",
+            "short_name": "Level",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 127
+        }
     ]
 }
