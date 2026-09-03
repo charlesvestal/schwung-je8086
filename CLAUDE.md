@@ -85,6 +85,22 @@ i.e. channel 16, still listening. `RemoteControlChannel` next door genuinely doe
 go to 17, which is what makes the two look interchangeable and neither of them
 is. Upstream bug; worth a PR.
 
+**Power-Up Mode is the one entry a module cannot honour**, and it is the only
+one left out on those grounds: the child boots from a snapshot and we then apply
+the slot's own state, so what the firmware would have loaded at power-on is
+overwritten before anyone can hear it.
+
+Several others do nothing MEASURABLE through a slot today -- Keyboard Shift
+transposes the physical keyboard (a note on the remote channel is identical at
+-2, 0 and +2), Local disconnects an internal keyboard we do not have, and the
+ribbon is a panel fader (`kFader_Ribbon1/2`) that nothing here can move.
+`jemiditypes.h` marks those three "(keyboard only)". **They are exposed anyway**:
+they are per-set, per-preset state that rides in the `sys` blob, and a setting
+that is latent is not a setting that is wrong. Gate Time Ratio was nearly cut on
+weaker evidence still -- the render that appeared to show it inert never
+established the arpeggiator was running, so it measured nothing. Being unable to
+observe a parameter is not the same as knowing it does nothing.
+
 **System settings are not in the temp performance, so they need their own state
 field.** `state_get` writes `"sys":"<hex>"` (version 2) holding one byte per
 EXPOSED system parameter in table order, and `state_apply` replays them as
