@@ -55,8 +55,15 @@ static void host_log(const char *msg) { fprintf(stderr, "[host] %s\n", msg); }
  * ring is full, so a probe that never pulls audio sees a plugin that answers
  * metadata and nothing else. Drain it the way the chain host does. */
 struct pump_arg { plugin_api_v2_t *api; void *inst; volatile bool stop; };
+/* PLUGIN_PARAMS_NO_PUMP=1 stops draining the plugin's audio, which is what a
+ * slot the shim has idled looks like. It existed as a workaround: without the
+ * pump the child's ring filled, the child stopped stepping, and every UI
+ * service under the throttle stopped with it -- so a bank switch or a preset
+ * load never completed. With that fixed, running WITHOUT the pump is the
+ * regression test for it. */
 static void *render_pump(void *a) {
     pump_arg *p = (pump_arg*)a;
+    if (getenv("PLUGIN_PARAMS_NO_PUMP")) return nullptr;
     int16_t buf[256];
     while (!p->stop) { p->api->render_block(p->inst, buf, 128); usleep(2900); }
     return nullptr;
