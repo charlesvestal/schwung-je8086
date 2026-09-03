@@ -93,6 +93,23 @@ list ends with `! N files ignored`; the name is the whole message, and the empty
 preset list under it is the honest answer. `bank_scan` audits a corpus without
 booting the emulator.
 
+**The browser name comes from the PARSED BANK, not from the synth.**
+`patch_name` / `performance_name`, bare or `:N`, is the name of a ROW -- read
+out of the table the child filled from the file it parsed, with no emulator
+involvement. It used to answer "what is LOADED" from the temp image, on the
+reasoning that a factory performance carries its own patches so what SOUNDS is
+"Chariots U" rather than whatever the list points at. True, and the wrong
+question for a browser to ask: the image is an ANSWER FROM THE FIRMWARE, so the
+name appeared "after a moment", and after a bank switch it kept showing the
+previously loaded preset until the jog moved. Both complaints were one sentence
+-- the browser was displaying the synth's state where the user was reading the
+list's. `loaded_patch_name` / `loaded_performance_name` still ask the image.
+
+**Selecting a bank resets the row to 0.** The index is a position in THIS bank;
+carrying it across landed at 40 in a bank of 32, an index with no row, so the
+name read as -1 and the browser showed nothing. It loads nothing -- only setting
+`patch`/`performance` does that.
+
 **Loading a PATCH obeys Edit Part** (`load_part`): Upper, Lower or Both, so one
 sound can be taken from a bank into one half of a split. A PERFORMANCE always
 replaces both, because a performance *is* both.
