@@ -19,8 +19,8 @@ jobs:
       - name: Init the submodules the plugin needs
         run: |
           git submodule update --init libs/gearmulator
-          git -C libs/gearmulator submodule update --init source/dsp56300 source/mc68k
-          git -C libs/gearmulator/source/dsp56300 submodule update --init source/asmjit
+          git -C libs/gearmulator submodule update --init source/cpu/dsp56300 source/cpu/mc68k
+          git -C libs/gearmulator/source/cpu/dsp56300 submodule update --init source/asmjit
 
       - name: Build
         run: ./scripts/build.sh
