@@ -9,8 +9,8 @@
  *   # comment
  *   <time_ms> on <note> <vel> [ch]      note-on (channel 1-16, default 1)
  *   <time_ms> off <note> [ch]           note-off
- *   <time_ms> pc <prog>                 program change
- *   <time_ms> cc <controller> <value>   control change
+ *   <time_ms> pc <prog> [ch]             program change (ch 16 = performance select)
+ *   <time_ms> cc <controller> <value> [ch]  control change
  *   <time_ms> pb <lo> <hi>              pitch bend
  *   <time_ms> button <id> <down|up>     front-panel switch (je8086devices.h)
  *   render_seconds <float>              total render length (default 5)
@@ -130,13 +130,15 @@ static bool parse_script(const std::string &path, Script &out, uint32_t samplera
             if (!(iss >> ch)) ch = 1;
             ev.a = (uint8_t)(0x80 | ((ch - 1) & 0x0f)); ev.b = (uint8_t)note; ev.c = 0;
         } else if (action == "pc") {
-            int prog;
+            int prog, ch = 1;
             iss >> prog;
-            ev.a = 0xC0; ev.b = (uint8_t)prog; ev.c = 0;
+            if (!(iss >> ch)) ch = 1;          /* optional 1-16; 16 selects performances */
+            ev.a = (uint8_t)(0xC0 | ((ch - 1) & 0x0f)); ev.b = (uint8_t)prog; ev.c = 0;
         } else if (action == "cc") {
-            int controller, value;
+            int controller, value, ch = 1;
             iss >> controller >> value;
-            ev.a = 0xB0; ev.b = (uint8_t)controller; ev.c = (uint8_t)value;
+            if (!(iss >> ch)) ch = 1;
+            ev.a = (uint8_t)(0xB0 | ((ch - 1) & 0x0f)); ev.b = (uint8_t)controller; ev.c = (uint8_t)value;
         } else if (action == "start") {
             ev.a = 0xFA; ev.b = 0; ev.c = 0;
         } else if (action == "stop") {

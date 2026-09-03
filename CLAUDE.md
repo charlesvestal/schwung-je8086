@@ -212,6 +212,40 @@ nothing paginated, nothing wrapped, two-option settings drawn as switches. A
 per-level layout pin is a host feature and is still not built; nothing here needs
 it.
 
+## Verifying a change is behaviour-preserving
+
+`tools/ab/bitexact.sh <ref_build> <new_build> <rom_dir> tests/scripts` renders
+every script on both builds and compares SHA-256. The perceptual score in
+`compare_wavs.py` is the wrong instrument for an optimization claiming to change
+nothing: that claim is bit-exactness, so compare hashes.
+
+**A script is only evidence if it is reproducible.** The harness renders each
+script several times per build and reports one whose own output varies as
+UNSTABLE, excluding it -- otherwise the harness's own jitter gets read as a
+regression from the change under test. That happened: `performance_select` was
+reported as DIFFERS before the self-check existed.
+
+**Performance SWITCHING is intermittently nondeterministic; the performances are
+not.** Each of performances 4, 9, 17 and 31 held alone renders bit-identical
+across runs, so this is not a random LFO or S&H in the sound. Selecting one
+performance and then another, with notes played near the switch, gives 2-3
+distinct hashes over 6 runs of the SAME binary; the runs diverge at an identical
+sample index with 0.1-1% of samples differing. Switching with notes kept well
+clear of the switch is deterministic. Root cause not established -- it is in the
+render path, not in our optimizations.
+
+**The note-only scripts do not exercise patch changes.** They send `pc 0` and
+nothing else, so they compile 15 ESP programs at boot and none after -- which
+means they say nothing about per-core dirty tracking, whose whole purpose is the
+recompile burst at a patch change. `patch_sweep` walks eight factory patches
+(109 program compiles, 762 `genProgram` calls) and is the script that covers it.
+`pc`/`cc` take an optional channel so a performance select on channel 16 is
+expressible at all.
+
+**Upstream has no JP-8000 audio regression corpus.** `jeTestConsole` plays the
+factory demo to a wav; there is no `add_test` and no ctest anywhere for je8086.
+Any bit-exactness evidence for an upstream PR has to come from here.
+
 ## Building
 
 ```bash

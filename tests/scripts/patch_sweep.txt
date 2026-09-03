@@ -1,0 +1,34 @@
+# Walk several factory PATCHES while playing, so each change forces the H8S to
+# reprogram the ASICs and the ESP JIT to recompile. This is the only script that
+# exercises the per-core dirty-tracking path; the note-only scripts compile 15
+# programs at boot and none after.
+render_seconds 10
+0     cc 0 80 1
+0     cc 32 0 1
+100   pc 0 1
+200   on 60 100
+900   off 60
+1000  pc 4 1
+1100  on 62 100
+1800  off 62
+2000  pc 11 1
+2100  on 64 100
+2800  off 64
+3000  pc 23 1
+3100  on 65 100
+3800  off 65
+4000  pc 37 1
+4100  on 67 100
+4800  off 67
+5000  pc 48 1
+5100  on 69 100
+5800  off 69
+6000  pc 60 1
+6100  on 71 100
+6800  off 71
+7000  pc 72 1
+7100  on 72 100
+7800  off 72
+8000  pc 0 1
+8100  on 60 100
+9000  off 60
