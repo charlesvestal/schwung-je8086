@@ -98,7 +98,17 @@ typedef struct plugin_api_v2 {
 #define AUDIO_RING_SIZE     8192   /* int16_t stereo pairs */
 /* Producer sleeps above this (~68 ms at 88.2 kHz) and boots to it: this is
  * both the stall the pipeline can absorb and the MIDI-to-audio latency. */
-#define AUDIO_RING_THROTTLE 6000
+/* 10 ms of render-ahead (x88.2 samples/ms), not 68.
+ *
+ * This is the module's output LATENCY -- the parent plays from behind the
+ * child's write head, so everything in the ring is delay a player hears. At
+ * the old 6000 (68 ms) JE-8086 was audibly behind other slots on the same
+ * beat. Measured on hardware against a reference hihat: 6 ms still plays
+ * clean, so 10 is the floor plus margin, and buffer_ms moves it. */
+#define AUDIO_RING_THROTTLE 882
+/* Emulator note-to-sound, independent of the ring: 82 ms measured with a
+ * 65 ms ring in front of it. Not removable -- it is the firmware responding. */
+#define JE_FIXED_LATENCY_MS 17
 #define MIDI_FIFO_SIZE      4096
 #define OUTPUT_GAIN         0.5f
 #define JE_BLOCK_SIZE       128
@@ -359,6 +369,12 @@ struct jp8000_shm_t {
      * last known values instead of going blank. */
     volatile uint32_t temp_rx_mask;
     volatile int temp_pending;
+    /* How far ahead the child renders, in 88.2 kHz samples. This IS the
+     * module's output latency: the parent plays from behind the write head, so
+     * everything sitting in the ring is delay a player hears. It is also the
+     * jitter buffer the three forked stages live on, which is why it is a dial
+     * and not a smaller constant. */
+    volatile int audio_throttle;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     /* Folder each bank came from, "" for the top of banks/. The browser walks
      * folder -> bank -> preset. */
@@ -1433,7 +1449,7 @@ static void child_main(jp8000_shm_t *shm) {
      * it sees "ready", so a ring declared ready at 512 samples (6 ms) was
      * being consumed while it filled, and underran on the first blocks. */
     int prefill = 0;
-    while (audio_ring_available(shm) < AUDIO_RING_THROTTLE && prefill < 5000000) {
+    while (audio_ring_available(shm) < shm->audio_throttle && prefill < 5000000) {
         for (int a = split; a < 4; a++)
             je->getAsics().setReadback(a, (const uint8_t*)shm->readback[a]);
         je->step();
@@ -1514,7 +1530,7 @@ static void child_main(jp8000_shm_t *shm) {
                               || sx_ring_available(shm) > 0
                               || midi_fifo_available(shm) > 0;
 
-        if (!ui_pending && audio_ring_available(shm) >= AUDIO_RING_THROTTLE) {
+        if (!ui_pending && audio_ring_available(shm) >= shm->audio_throttle) {
             usleep(1000);
             continue;
         }
@@ -1706,6 +1722,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     memset(inst->shm, 0, sizeof(jp8000_shm_t));
     inst->pipeline_lock_fd = -1;
     /* -1 so the first request for bank 0 is a request */
+    inst->shm->audio_throttle = AUDIO_RING_THROTTLE;
     inst->shm->patch_bank_cur = -1;
     inst->shm->perf_bank_cur = -1;
     strncpy((char*)inst->shm->module_dir, module_dir, sizeof(inst->shm->module_dir) - 1);
@@ -1884,8 +1901,9 @@ static int state_get(jp8000_instance_t *inst, char *buf, int buf_len) {
     jp8000_shm_t *shm = inst->shm;
     if (!inst->ui_ready || (shm->img_valid & IMG_ALL_TEMP) != IMG_ALL_TEMP) return -1;
     int n = snprintf(buf, buf_len,
-        "{\"version\":2,\"mode\":%d,\"part\":%d,\"bank\":%d,\"patch\":%d,\"perf_bank\":%d,\"performance\":%d,\"temp\":\"",
-        inst->mode, inst->part, inst->bank, inst->patch, inst->perf_bank, inst->performance);
+        "{\"version\":2,\"mode\":%d,\"part\":%d,\"bank\":%d,\"patch\":%d,\"perf_bank\":%d,\"performance\":%d,\"buffer_ms\":%d,\"temp\":\"",
+        inst->mode, inst->part, inst->bank, inst->patch, inst->perf_bank, inst->performance,
+        (int)(shm->audio_throttle / 88.2f + 0.5f));
     if (n >= buf_len - (JP_TEMP_TOTAL_LEN * 2 + 3)) return -1;
     static const char hexd[] = "0123456789abcdef";
     SHM_LOAD_FENCE();
@@ -1938,6 +1956,7 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
     if ((v = json_int_field(s, "patch", -1)) >= 0) inst->patch = clampi(v, 0, JP_MAX_PRESETS - 1);
     if ((v = json_int_field(s, "perf_bank", -1)) >= 0) inst->perf_bank = v;
     if ((v = json_int_field(s, "performance", -1)) >= 0) inst->performance = clampi(v, 0, JP_MAX_PRESETS - 1);
+    if ((v = json_int_field(s, "buffer_ms", -1)) > 0) shm->audio_throttle = (int)(clampi(v, 4, 90) * 88.2f);
     if (shm->patch_bank_count > 0) inst->bank = clampi(inst->bank, 0, shm->patch_bank_count - 1);
     if (shm->perf_bank_count > 0) inst->perf_bank = clampi(inst->perf_bank, 0, shm->perf_bank_count - 1);
     shm->patch_bank_req = inst->bank;
@@ -2072,6 +2091,14 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         inst->part = clampi(atoi(val), 0, 2);
         const jp_param_t *ps = jp_find_param("panel_select");
         if (ps) param_write(inst, ps, inst->part);
+        return;
+    }
+    if (strcmp(key, "buffer_ms") == 0) {
+        /* ms -> 88.2 kHz samples. Lowering it takes effect by simply not
+         * refilling: the ring drains to the new target on its own. Raising it
+         * fills over the next few blocks. Neither needs a restart. */
+        const int ms = clampi(atoi(val), 4, 90);
+        shm->audio_throttle = (int)(ms * 88.2f);
         return;
     }
     if (strcmp(key, "bank_list") == 0) {
@@ -2231,6 +2258,16 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             }
             return -1;
         }
+        /* What this slot is LATE BY, in ms, for anything that wants to line
+         * it up with something else. The ring is the whole of the part we
+         * control; JE_FIXED_LATENCY_MS is the emulator's own note-to-sound
+         * response, measured on a paced consumer (82 ms total against a 65 ms
+         * ring). Nothing in the host consumes this yet. */
+        if (strcmp(key, "latency_ms") == 0)
+            return snprintf(buf, buf_len, "%d",
+                            (int)(shm->audio_throttle / 88.2f + 0.5f) + JE_FIXED_LATENCY_MS);
+        if (strcmp(key, "buffer_ms") == 0)
+            return snprintf(buf, buf_len, "%d", (int)(shm->audio_throttle / 88.2f + 0.5f));
         if (strcmp(key, "bank") == 0) return snprintf(buf, buf_len, "%d", inst->bank);
         if (strcmp(key, "perf_bank") == 0) return snprintf(buf, buf_len, "%d", inst->perf_bank);
         if (strcmp(key, "patch") == 0) return snprintf(buf, buf_len, "%d", inst->patch);
