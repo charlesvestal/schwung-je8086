@@ -181,6 +181,8 @@ endif()
 add_executable(plugin_host_test src/tools/plugin_host_test.cpp)
 target_link_libraries(plugin_host_test PRIVATE dl pthread)
 
+add_executable(bank_scan src/tools/bank_scan.cpp)
+
 add_executable(plugin_params src/tools/plugin_params.cpp)
 target_link_libraries(plugin_params PRIVATE dl pthread)
 if(NOT APPLE)
