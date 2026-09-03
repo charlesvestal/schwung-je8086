@@ -83,6 +83,36 @@ blocked, so a ring crossing costs tens of nanoseconds, not microseconds. An
 earlier note here claimed batching it was the next big win; that was inferred
 from the boot-inflated numbers above and is wrong.
 
+**In a plugin host, leave a core for the host: 3 stages beat 4.** Measured with
+the JE8086 CLAP plugin in clap-trap on an idle Pi 4B, 48 kHz, 256-sample blocks
+(5333 us budget), `throttled=0x0`:
+
+| Configuration | RT factor | us/block |
+|---------------|-----------|----------|
+| serial (upstream today) | 0.7x | 7621 |
+| pipeline, 2 stages | 1.7x | 3196 |
+| **pipeline, 3 stages** | **1.8x** | **2953** |
+| pipeline, 4 stages | 1.4x | 3757 |
+
+Four stages pins every core and starves the host's own audio thread; the
+standalone bench never showed this because it had no host to starve. Three
+stages uses 55% of the block budget -- comfortable, not marginal.
+
+**Benchmark on an IDLE box.** The same plugin measured 1.1x with Ardour running
+alongside and 1.8x without. Check `/proc/loadavg` first; several numbers taken
+this way had to be retracted.
+
+**Debian ships realtime audio limits DISABLED.**
+`/etc/security/limits.d/audio.conf.disabled` -- until it is copied to
+`audio.conf`, `ulimit -r` is 0, nothing can get SCHED_FIFO, and every tool
+prints "Failed to set thread priority: Permission denied". With it enabled
+(rtprio 95, memlock unlimited) the headless host went from 113 xruns to 6 at a
+20 ms buffer. This was true for the whole first day of measurements here.
+
+**The resampler is not the cost.** Normalised to CPU per second of audio, serial
+is 1.44x at 88.2 kHz and 1.46x at 48 kHz -- identical, because the engine always
+runs at 88.2 kHz internally whatever the host asks for.
+
 **The pipeline is what reaches real-time, and it does so on stock hardware.**
 Same Pi 4B @ 1.8 GHz, stock Debian 13, no Move-specific anything:
 
