@@ -354,6 +354,11 @@ struct jp8000_shm_t {
      * indistinguishable from a broken browser -- in a real collection 41 of 97
      * files parse to nothing -- so the count is published for the UI to say. */
     int bank_files_skipped;
+    /* Temp-dump arrival, tracked apart from img_valid: the image stays
+     * READABLE while a new dump is on its way, so the UI keeps showing the
+     * last known values instead of going blank. */
+    volatile uint32_t temp_rx_mask;
+    volatile int temp_pending;
     char patch_bank_names[JP_MAX_BANKS][JP_BANK_NAME_LEN];
     /* Folder each bank came from, "" for the top of banks/. The browser walks
      * folder -> bank -> preset. */
@@ -725,7 +730,16 @@ static void child_image_from_dt1(jp8000_shm_t *shm, const uint8_t *m, int len) {
     memcpy(img + lin, data, copy);
     /* A block counts as valid once its LAST byte has been written: the
      * replies arrive low address first, so this is when it is whole. */
-    if (lin + copy >= (uint32_t)cap || bit == IMG_SYSTEM) shm->img_valid |= bit;
+    if (lin + copy >= (uint32_t)cap || bit == IMG_SYSTEM) {
+        shm->img_valid |= bit;
+        /* Separate mask, so "has the dump I asked for arrived" is answerable
+         * WITHOUT invalidating the image. Clearing img_valid to detect that
+         * blanked every knob on every page for as long as the dump was in
+         * flight -- param_read returns -1 on a clear bit, and a preset load
+         * would have emptied the whole grid for a couple of seconds. */
+        shm->temp_rx_mask |= bit;
+        if ((shm->temp_rx_mask & IMG_ALL_TEMP) == IMG_ALL_TEMP) shm->temp_pending = 0;
+    }
     SHM_STORE_FENCE();
     shm->img_seq++;
 }
@@ -1131,12 +1145,11 @@ static bool child_serve_load(jp8000_shm_t *shm, const child_banks_t &banks, jeLi
                 }
             }
         }
-        /* Invalidate before asking. The image is the ANSWER to this request,
-         * so leaving the old bits set means the loop below cannot tell "the
-         * new patch has arrived" from "the previous one is still there" --
-         * and the parent would keep serving the old name as if it were the
-         * new one. */
-        shm->img_valid &= ~(uint32_t)IMG_ALL_TEMP;
+        /* Arm the arrival mask rather than invalidating the image: the loop
+         * needs to know when the new dump lands, and every reader needs the
+         * old values until it does. */
+        shm->temp_rx_mask = 0;
+        shm->temp_pending = 1;
         SHM_STORE_FENCE();
         child_request_temp(je);
     }
@@ -1493,8 +1506,7 @@ static void child_main(jp8000_shm_t *shm) {
          * arming condition was already false. Nothing re-armed it, the child
          * went back to sleep, and the load was never consumed -- the exact
          * symptom this was meant to fix, reintroduced one line further up. */
-        if (awaiting_until && ((shm->img_valid & IMG_ALL_TEMP) == IMG_ALL_TEMP
-                               || now_us() >= awaiting_until))
+        if (awaiting_until && (!shm->temp_pending || now_us() >= awaiting_until))
             awaiting_until = 0;
 
         const bool ui_pending = (shm->load_seq != shm->load_done)

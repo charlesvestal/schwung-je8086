@@ -105,6 +105,14 @@ previously loaded preset until the jog moved. Both complaints were one sentence
 -- the browser was displaying the synth's state where the user was reading the
 list's. `loaded_patch_name` / `loaded_performance_name` still ask the image.
 
+**Arrival is tracked apart from validity.** `temp_rx_mask` / `temp_pending`
+answer "has the dump I asked for landed" without clearing `img_valid`. Clearing
+it to detect that -- the obvious way -- blanks the WHOLE UI: `param_read`
+returns -1 on a clear bit, so every knob on every page reads as unavailable for
+as long as the dump is in flight, and `state_get` refuses too, which is a
+silently skipped autosave. The image stays readable and shows the last known
+values until the new ones arrive.
+
 **Selecting a bank resets the row to 0.** The index is a position in THIS bank;
 carrying it across landed at 40 in a bank of 32, an index with no row, so the
 name read as -1 and the browser showed nothing. It loads nothing -- only setting
