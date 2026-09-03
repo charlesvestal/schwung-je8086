@@ -83,6 +83,30 @@ blocked, so a ring crossing costs tens of nanoseconds, not microseconds. An
 earlier note here claimed batching it was the next big win; that was inferred
 from the boot-inflated numbers above and is wrong.
 
+**A worker thread the host's RT thread waits on MUST be realtime too.** This was
+the single biggest bug found in the DAW. A host calls process() from SCHED_FIFO
+(Ardour: 78); jeLib hands the work to JeThread, which is SCHED_OTHER; the
+pipeline handed it on again to SCHED_OTHER stage threads. The host's realtime
+thread therefore blocked on non-realtime workers, and whenever the GUI or X
+wanted a core the deadline was missed.
+
+It does NOT look like a scheduling bug from the outside -- it looks like the
+plugin being too slow. The tell is the CPU: continuous xruns at 98-100% DSP
+while 70% of the machine sat IDLE and the process used 118% of 400%. Compute
+shortage saturates the box; priority inversion does not.
+
+With `JE_PIPELINE_RTPRIO=70` (below the host's own audio thread -- we are a
+producer it waits on, not a peer), same session and buffer:
+
+| | DSP | xruns |
+|---|-----|-------|
+| stages SCHED_OTHER | 98-100% | thousands |
+| stages SCHED_FIFO | **16-22%** | **none in 60 s** |
+
+Headless it barely shows (11 xruns vs 10): with no GUI competing, the
+non-realtime threads are scheduled promptly anyway. It is specifically a
+*shared machine* failure, which is why it never appeared in any bench.
+
 **In a plugin host, leave a core for the host: 3 stages beat 4.** Measured with
 the JE8086 CLAP plugin in clap-trap on an idle Pi 4B, 48 kHz, 256-sample blocks
 (5333 us budget), `throttled=0x0`:
