@@ -1,155 +1,203 @@
 # Upstreaming to dsp56300/gearmulator
 
-Status as of 2026-09-03. Our branch is `rebase-onto-upstream`, 15 commits on top
-of upstream `c5dddcd0`, tagged `upstream-rebase-2026-09-03`.
+Status 2026-09-03. Branch `rebase-onto-upstream`, on upstream `c5dddcd0`, tagged
+`upstream-rebase-2026-09-03`. Everything below was measured on a Raspberry Pi 4B
+rev 1.5 @ 1.8 GHz, Debian 13 arm64, PSU + wifi, `throttled=0x0` verified before
+and after each run.
 
-## The PRs do not map 1:1 onto our commits
+## What we have
 
-Our commits are bundled by the order we discovered things, not by what upstream
-should review. `787c8dfe` alone carries FOUR separate candidates, and
-`04098db8` mixes one genuine upstream bug fix with two changes that must not go
-upstream. Every PR below needs the commit split, not cherry-picked.
+Two independent pieces of work.
 
-| Change | Lives in | Files |
-|---|---|---|
-| FTZ never enabled outside MSVC | `04098db8` | `framework/baseLib/os.cpp` |
-| MIDI-out `printf` on render path | `574e6c10` | `cpu/h8s/h8sdevices.hpp` |
-| H8S page bitmap + wide accesses | `787c8dfe` | `cpu/h8s/h8s.hpp` |
-| Timer event horizon | `787c8dfe` | `cpu/h8s/h8sdevices.hpp` (+ `instrStartCycles` in `h8s.hpp`) |
-| ESP per-core dirty tracking | `787c8dfe` | `esp/esp_opt.hpp`, `esp/esp.hpp`, `jeLib/je8086devices.h` |
-| `a64::Assembler` not `Builder` | `787c8dfe` | `esp/esp_jit_types.h`, `esp/esp_jit_arm64.h` |
-| Dense ARM64 emitter + ring mirror | `bf974365` | `esp/esp_jit_arm64.cpp`, `esp/esp_opt.hpp`, `esp/esp.hpp` |
+**A. Engine optimizations** — always on, bit-exact, help any host. Timer event
+horizon, H8S page-mapped memory access, ESP per-core dirty tracking, asmjit
+Assembler instead of Builder, dense ARM64 emitter.
 
-## Tier 1 — submit first, self-contained
+**B. A parallel ASIC pipeline** — opt-in, off by default. The JP-8000 chain is
+four ASICs in series, so it does not parallelise by splitting a sample across
+cores; it PIPELINES, one stage per core, each handing its neighbour the GRAM
+words that cross the boundary. Throughput is bounded by the slowest stage rather
+than their sum.
 
-**1. `setFlushDenormalsToZero()` is a no-op on every non-MSVC build.**
-The strongest PR in the set and unrelated to the JP-8000. `HAVE_SSE` is never
-defined project-wide -- `git grep HAVE_SSE` upstream finds it defined only
-locally inside `rmlRendererJuce.cpp` -- so denormal flush was never enabled on
-any Linux or macOS build, x86-64 or ARM, for any device including the Virus.
-Fix: key the SSE path off `__SSE__`, add the aarch64 FPCR FZ path. ~10 lines.
-The same dead gate appears in `framework/baseLib/filesystem.cpp` and
-`framework/synthLib/os.cpp`, but there it only guards an `#include
-<immintrin.h>` -- no behaviour, worth mentioning in the PR, not worth widening
-it. Split this OUT of `04098db8`: the `base.cmake` codegen flags and the
-`dspSingle.cpp` `usleep` in that commit are Move-specific and do not go.
+## The numbers
 
-**2. Remove the `printf("MIDI Out: [%02x]")` on the H8S serial write path.**
-A `write()` syscall per MIDI byte from the emulation thread, in two places.
-5 lines, ships as-is.
+Steady-state, boot excluded (see *Measurement traps* below):
 
-**3. H8S page-mapped access + wide-access fast path.** Split into two commits so
-each is judged separately: the `mappedPages` bitmap (every instruction fetch
-previously probed a 16 M-entry pointer table), then the 16/32-bit fast path.
-Lead the message with the fact that earns it: the per-byte `clockMem()` calls are
-kept verbatim, so cycle counts -- and the ASIC sample cadence -- are unchanged.
+| Configuration | RT factor | vs previous |
+|---------------|-----------|-------------|
+| Stock upstream, serial | 0.433x | — |
+| + engine optimizations | 0.800x | **1.85x** |
+| + 4-stage pipeline, through `Device` | **2.26x** | **2.98x** |
+| **Total** | | **5.2x** |
 
-**4. `a64::Assembler` instead of `a64::Builder`.** Six lines. The ESP program is
+Engine-level (`bench_je*`, excludes Device):
+
+| | serial | 2 stages | 3 stages | 4 stages |
+|---|--------|----------|----------|----------|
+| fork | 0.85x | 2.06x | 2.58x | 2.94x |
+| threads | — | 2.01x | 2.62x | 2.92x |
+
+Threads match fork at every depth. The pipeline ceiling is set by stage 0
+(H8S + ASIC0) at 3.76 us/sample against an 11.34 us budget: 11.34/3.76 = 3.02x,
+which is what four stages deliver. Splitting the H8S from ASIC0 is the only way
+past it.
+
+**The gains are architecture-specific.** The same engine optimizations measured
+on Apple Silicon: 6.92x -> 6.93x, i.e. nothing. A narrow in-order-ish core with
+slow memory pays for the per-instruction timer loop, the pointer-table
+indirection and the extra ESP loads/stores; a wide out-of-order core absorbs
+them. Do not quote 1.85x to a desktop reviewer. x86 desktop is UNMEASURED.
+
+## Correctness evidence
+
+- Engine optimizations: 5 of 6 corpus scripts byte-identical before/after
+  (`tools/ab/bitexact.sh`). The sixth, `performance_select`, is excluded as
+  nondeterministic in the render path, independent of our changes.
+- Pipeline: the raw ASIC3 tap is byte-identical to serial and identical across
+  runs; the wav is the serial stream delayed by a fixed 3 frames (0.034 ms).
+- Determinism required a FIXED delay, not a bounded one. See below.
+- Cross-platform: `sustained_c4` hashes the same on macOS/arm64 and Linux/arm64,
+  so a reviewer can reproduce a hash rather than take our word.
+
+## The PRs
+
+Ours are bundled by discovery order, not by what upstream should review, so most
+of these need a commit split rather than a cherry-pick. `787c8dfe` alone carries
+four separate candidates.
+
+### 1. `setFlushDenormalsToZero()` is a no-op outside MSVC
+`framework/baseLib/os.cpp`, ~10 lines. `HAVE_SSE` is never defined project-wide
+(only locally inside `rmlRendererJuce.cpp`), so denormal flush was never enabled
+on any Linux or macOS build, x86-64 or ARM, for any device — Virus included.
+Key the SSE path off `__SSE__`, add the aarch64 FPCR FZ path.
+
+Lead with this one: it is a real bug in their code, needs no JP-8000 knowledge,
+and is unrelated to everything else. Split it out of `04098db8` — the
+`base.cmake` flags and `dspSingle.cpp` sleep beside it are Move-specific.
+The same dead gate in `filesystem.cpp` and `synthLib/os.cpp` only guards an
+`#include`; mention it, do not widen the PR.
+
+### 2. Remove the MIDI-out `printf`
+`cpu/h8s/h8sdevices.hpp`, 5 lines. A `write()` syscall per MIDI byte from the
+emulation thread, in two places. Ships as-is.
+
+### 3. H8S page bitmap
+`cpu/h8s/h8s.hpp`. Every instruction fetch previously probed a 16 M-entry
+pointer table; an 8 KB bitmap answers first. Bit-exact.
+
+### 4. H8S wide-access fast path
+Same file, separate PR so each is judged alone. 16/32-bit accesses that lie in
+one unmapped page read `memory[]` directly. **The per-byte `clockMem()` calls are
+kept verbatim, so cycle counts — and the ASIC sample cadence — are unchanged.**
+Put that sentence in the commit message; it is what earns the merge.
+
+### 5. Timer event horizon
+`cpu/h8s/h8sdevices.hpp` + `instrStartCycles` in `h8s.hpp`. The largest single
+engine win. Nothing observable happens between compare-match/overflow/IRQ
+events, so skip to the next one; register accesses catch up first.
+
+Correctness argument, verified: `timers.tick()` runs AFTER `emu.step()`, so the
+old code updated to end-of-instruction cycles, and `catchUp()` uses
+`instrStartCycles`, which is exactly that point. Deferred increments equal
+per-instruction ones because `inc` is a difference of floors, additive across
+any split. Pre-empt two questions: the skip conditions in `update()` and in the
+`nextEvent` recompute must stay in lockstep, and `write()` resets `nextEvent`.
+
+### 6. `a64::Assembler` instead of `a64::Builder`
+`esp/esp_jit_types.h`, `esp/esp_jit_arm64.h`. Six lines. The ESP program is
 straight-line with no labels or node edits, so it is a drop-in with identical
-encodings. Clean up first: `m_asm.finalize()` is currently guarded by
-`#if JIT_X64`, which keys off the architecture rather than the builder type.
+encodings; `Builder::finalize()` was re-walking every node. Clean up first:
+`m_asm.finalize()` is guarded by `#if JIT_X64`, which keys off the architecture
+rather than the builder type.
 
-## Tier 2 — good value, strip instrumentation first
+### 7. ESP per-core dirty tracking
+`esp/esp_opt.hpp`, `esp/esp.hpp`, `jeLib/je8086devices.h`. The change is ~15
+lines: a `cores` mask threaded through `setProgramDirty`/`genProgram` and the two
+`writeuC` call sites, where core 0 owns `intmem` words `0..0x3ff` and core 1 the
+rest. Everything else in that hunk is instrumentation and stays here. Comment the
+0x56 path's straddling mask.
 
-**5. Timer event horizon.** The largest general CPU win. Contained in
-`h8sdevices.hpp` plus one field in `h8s.hpp`. The correctness argument, verified
-here: `timers.tick()` is called *after* `emu.step()`, so the old code updated to
-end-of-instruction cycles, and `catchUp()` uses `instrStartCycles`, which is
-exactly that same point. Deferred increments equal per-instruction ones because
-`inc` is a difference of floors, additive across any split. Pre-empt two reviewer
-questions: the skip conditions in `update()` and in the `nextEvent` recompute
-loop are duplicated and must stay in lockstep, and `write()` conservatively
-resets `nextEvent = 0`.
-
-**6. ESP per-core dirty tracking.** The real change is ~15 lines: a `cores` mask
-threaded through `setProgramDirty`/`genProgram` and the two `writeuC` call sites.
-Core 0 owns `intmem` words `0..0x3ff`, core 1 the rest. Everything else in that
-hunk is instrumentation and does not go upstream. Comment the one tricky line --
-the 0x56 path's `(addr < 0x400 ? 1 : 0) | (addr + 4 >= 0x400 ? 2 : 0)`, a 5-word
-write straddling the core boundary.
-
-## Tier 3 — ARM64 codegen, one PR with numbers
-
-**7 + 8. Dense emitter and `ESP_IRAM_MIRROR`.** Inseparable: the mirror is what
-lets the emitter rebase the ring once and use immediate offsets. The only change
-in the set that alters generated-code semantics, so it needs the most evidence.
+### 8. Dense ARM64 emitter + ring mirror
+`esp/esp_jit_arm64.cpp`, `esp/esp_opt.hpp`, `esp/esp.hpp`. The only change that
+alters generated-code semantics; expect the most review.
 
 Lead with `coefsShifted`, which is easy to defend: `shiftAmount` is one of
 {3,5,6,7}, `coef` is `int8`, so `coef << 4 <= 2032` fits `int16`, and
 `(P << (7-s)) >> 7 == P >> s` exactly under arithmetic shift.
 
-Three things to settle before submitting:
-- `nextIsDmac` uses the next *statically emitted* op. This is consistent with
-  existing design, not a new assumption -- `esp_opt.hpp` already declares the
-  jump ops unsupported. We made that a real runtime report (it was an `assert`,
-  compiled out under `-Ofast`); offer that as part of the PR.
-- `jitEnter` zeroes `last_mulInput{A,B}_24` each call while the interpreter
-  carries them across samples. Not a regression (upstream left them as
-  callee-saved garbage) and measured unreachable across our whole corpus -- 109
-  program compiles in `patch_sweep`, 121 in `performance_select`, 15 in each
-  note-only script, and the first emitted op is a MAC every time. Say so, with
-  the limits.
-- We made the mirror unconditional locally. Upstream will not want two ring
-  layouts by architecture; keep it unconditional there too.
+Settle before submitting: `nextIsDmac` uses the next statically emitted op,
+consistent with the existing design (`esp_opt.hpp` already declares jumps
+unsupported — offer our runtime check for that, it was an `assert` compiled out
+under `-Ofast`); `jitEnter` zeroes `last_mulInput{A,B}_24` where the interpreter
+carries them, not a regression and measured unreachable across the corpus; keep
+`ESP_IRAM_MIRROR` unconditional, upstream will not want two ring layouts by
+architecture. The x64 emitter takes `nextIsDmac` and ignores it — say so.
 
-The `x64` emitter takes `nextIsDmac` and ignores it. Fine as a first step, but
-say so -- upstream may want parity or may want the signature change deferred.
+### 9. Parallel ASIC pipeline
+`jeLib/jePipeline.{h,cpp}`, `jeLib/je8086.{h,cpp}`, plus the stage-scoped
+`thread_local` state and hooks in `jeLib/je8086devices.h`.
+
+**Open an issue first.** This is a design conversation, not a drive-by patch: it
+adds threads to a device library, and the answer may be "yes, but through
+`clap.thread-pool`" or "yes, but block-level". Pitch it as what it is — the
+difference between 0.8x and 2.26x on an SBC, off by default, nothing changed for
+anyone who does not ask.
+
+Three things reviewers will and should ask:
+- **Why not fork?** A plugin cannot fork. Threads also removed the ragged
+  shutdown fork had.
+- **Is it exact?** Yes, with a FIXED delay. A bounded window is not enough:
+  how far the H8S actually leads still depends on thread timing, so runs differ
+  (three runs at window 4 gave three hashes). Delivering one sample per sample
+  rendered, taken a constant number of samples late, ties output to counters
+  alone. Two samples of delay suffices — it only has to cover samples in flight.
+- **Multiple instances?** The stage state is `thread_local`, which is correct
+  per stage but has never been tested with two JP-8000s in one process. Be
+  honest about that.
 
 ## Not upstreaming
 
-- **Fork-parallel process split** (`d9230451`, `5bf69b80`, `6b6f8502`,
-  `1abbe1e9`, `17c38c8f`, and the `je8086devices.h` half of `bf974365`).
-  File-scope mutable globals encoding a process topology that exists because of
-  Move's RT budget and `RLIMIT_RTPRIO 0`. If anything survives, it is the
-  generalised ASIC split reframed as a threaded pipeline -- an issue to open,
-  not a patch to send.
-- **`base.cmake` `-funroll-loops -fomit-frame-pointer`** -- global codegen flags
+- **The fork pipeline** and its Move-specific machinery: `g_je_parallel_mode`
+  file-scope globals, the shm rings, the `flock`, FIFO 20 clamping, core pinning
+  for Move's layout. The threaded pipeline is the upstreamable form.
+- **`base.cmake` `-funroll-loops -fomit-frame-pointer`** — global codegen flags
   on top of `-Ofast` with no per-change measurement.
-- **`dspSingle.cpp` yield -> `usleep(1000)`** -- a Move RT-starvation
-  workaround that slows Virus boot for everyone. The underlying complaint (a
-  busy-yield on a boot wait thread) is worth an issue.
-- **Snapshot v2** (`6a63bb04`, `44f4383e`, `630980f8`) -- useful, but a feature,
-  not a perf fix: bespoke `FILE*` format, no in-class versioning, most
-  `fread`/`fwrite` returns unchecked, and upstream has its own persistence
-  conventions. Propose before writing.
+- **`dspSingle.cpp` yield -> `usleep`** — a Move RT workaround that slows Virus
+  boot for everyone. The busy-yield on a boot wait thread is worth an issue.
+- **Snapshot v2** — a feature, not a perf fix: bespoke `FILE*` format, no
+  in-class versioning, unchecked `fread`/`fwrite`. Propose before writing.
+- **The test corpus and `bitexact.sh`** cannot go as-is: they drive
+  `jp8000_render`, which depends on our snapshot support. The evidence comes
+  from us running it, not from them. Porting a minimal renderer onto
+  `jeTestConsole` would change that, and would be a genuine contribution.
 
-## Evidence
+## Known gaps — disclose these
 
-Every Tier 1-3 item claims to be behaviour-preserving. That claim is
-bit-exactness, so the evidence is hashes, not the perceptual score in
-`compare_wavs.py`.
+- **`getExtraLatencySamples()` is not wired to the pipeline delay.** The delay is
+  fixed and tiny but a host should be told. This is the one functional gap.
+- **x86 desktop is unmeasured** for the engine optimizations. Apple Silicon says
+  ~0; a desktop is architecturally closer to that than to an A72.
+- **Two instances in one process** is untested with the pipeline.
+- `performance_select` remains nondeterministic in the render path; the fixed
+  delay work suggests why (unbounded run-ahead) but it has not been retested.
 
-`tools/ab/bitexact.sh <ref_build> <new_build> <rom_dir> tests/scripts` is the
-harness. Result on the rebased tree vs the same tree with the three performance
-commits removed: **5 identical, 0 differing, 1 excluded as unstable**
-(`performance_select`; see CLAUDE.md -- it is the render path, not our changes).
-Measured on Apple Silicon, so the ARM64 JIT and the mirrored ring are the paths
-actually exercised.
+## Measurement traps
 
-**Upstream has no JP-8000 audio regression corpus.** `jeTestConsole` plays the
-factory demo to a wav; there is no `add_test` and no ctest for je8086 anywhere.
-Contributing the corpus and harness may be worth its own PR, and it is what any
-bit-exactness claim rests on.
+Three real mistakes made while producing the numbers above. Anyone continuing
+this should know them.
 
-### Which numbers are measured, and where
+**Time renders WITHOUT boot.** A `jp8000_render` run carries ~1.0-1.4 s of
+snapshot load and JIT warm-up. Timing whole processes folded that into the rate
+and understated everything: the engine optimizations read 1.74x when they are
+1.85x, and the pipeline read 1.28x when it is 2.26x. Render 1 s and 9 s and take
+the slope.
 
-Measured in this repo on 2026-09-03: the bit-exactness result above; the program
-compile counts; `HAVE_SSE` never being defined upstream; the absence of an
-upstream corpus.
+**Profile before believing an arithmetic story.** A plausible per-sample cost
+model pointed at `JeThread`'s semaphore ring and produced a confident "batching
+it is the next big win". `perf` said 64% `[JIT]`, 32.5% binary, **2.78% kernel** —
+the ring cannot cost what the model claimed, and `SpscSemaphoreWithCount` is a
+single atomic unless a waiter is actually blocked. The whole premise was the boot
+artifact above.
 
-**Not re-measured this session** -- carried from earlier device work, and each
-needs a fresh number before it goes in a PR description: ESP compile cost
-0.45 -> 0.18 ms per core (Assembler), H8S stage 10.2 -> 7.5 us/sample (timer
-event horizon), ~120 compiles per patch change roughly halved (per-core dirty).
-
-## Order
-
-1. FTZ fix. 2. `printf` removal. Both trivially mergeable, and they establish a
-careful contributor before the large one lands.
-3. H8S page/wide access. 4. Assembler-not-Builder. 5. Timer event horizon.
-6. Per-core dirty. 7. ARM64 codegen, with benchmarks and the bit-exact matrix.
-
-Rebase before submitting, never after: our patches applied to upstream main with
-zero source conflicts on 2026-09-03 because every file we touch was
-byte-identical to our old base. That window closes as soon as upstream edits
-`esp_opt.hpp` or `h8sdevices.hpp`.
+**A dev Mac cannot see these gains.** 6.92x vs 6.93x on Apple Silicon for a
+change worth 1.85x on A72. Benchmark on the target class.

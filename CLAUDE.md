@@ -61,6 +61,10 @@ on Move" is a product claim that depends on machinery upstream is not getting.
 
 Threads match fork at every depth.
 
+**The engine optimizations are worth 1.85x on A72, not 1.74x.** Steady-state,
+boot excluded: 0.433x -> 0.800x real-time. With the four-stage pipeline on top,
+through Device, 2.26x -- 5.2x from stock upstream serial in total.
+
 **Time a render WITHOUT its boot, or the number is wrong.** A jp8000_render run
 carries ~1.0-1.4 s of fixed cost (snapshot load, JIT warm-up) and timing the
 whole process folds that into the rate: a 5 s render read 0.60x serial and 1.28x
