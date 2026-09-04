@@ -1328,8 +1328,11 @@ static void child_main(jp8000_shm_t *shm) {
 
     auto rom = jeLib::RomLoader::findROM();
     if (!rom.isValid()) {
+        /* Name the count and the extension: the common failure is supplying
+         * some of the dump, not none of it, and "no ROM found" reads as "wrong
+         * folder" to someone who has already put files there. */
         snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                 "No JP-8000 ROM found in roms/ directory.");
+                 "No JP-8000 ROM in roms/ - needs all 8 firmware .mid files");
         shm->initialized = 1; shm->loading_complete = 1;
         vlog("[child] no ROM found");
         return;
@@ -1766,8 +1769,19 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
         int status;
         pid_t res = waitpid(pid, &status, WNOHANG);
         if (res == pid) {
-            snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                     "DSP process exited (status=%d)", status);
+            /* DO NOT CLOBBER THE CHILD'S OWN DIAGNOSIS.
+             *
+             * The child sets load_error and returns, which exits 0 -- so the
+             * generic line here used to overwrite "No JP-8000 ROM found in
+             * roms/" with "DSP process exited (status=0)", a status code that
+             * says nothing and points at the wrong layer entirely. Every Store
+             * install lands with an empty roms/, so that was the DEFAULT first
+             * experience of this module, and it sent its own author looking at
+             * the release rather than at the missing files. The child knows
+             * why it stopped; only say something when it did not. */
+            if (!shm->load_error[0])
+                snprintf((char*)shm->load_error, sizeof(shm->load_error),
+                         "DSP process exited (status=%d)", status);
             shm->initialized = 1; shm->loading_complete = 1;
             inst->child_pid = 0;
             return -1;
