@@ -25,10 +25,10 @@ instrumentation, none of our other 24 commits. Verify with
 | timer event horizon | `pr/h8s-timer-event-horizon` | **DRAFT PR #293 open** (+6%) — `h8s-timer-event-horizon.md` |
 | denormal FTZ | — | **dropped**, no measurable benefit — `denormal-ftz-dropped.md` |
 | MIDI printf | — | not started; reframed as hygiene, not performance |
-| H8S page bitmap | — | not started |
-| H8S wide access | — | not started; **depends on the page bitmap** |
+| H8S page bitmap | `pr/h8s-wide-access` | **combined into DRAFT #296** — alone it is +0.01%, i.e. nothing |
+| H8S wide access | `pr/h8s-wide-access` | **DRAFT PR #296 open** — +1.38% with the bitmap, bit-exact — `h8s-page-bitmap-and-wide-access.md` |
 | a64::Assembler | — | not started |
-| ESP dirty tracking | `pr/esp-per-core-dirty` | **DRAFT PR #295 open** — 49.7% fewer core compiles, bit-exact — `esp-per-core-dirty.md` |
+| ESP dirty tracking | `pr/esp-per-core-dirty` | **#295 WITHDRAWN** — real but no user-visible benefit; revisit folded together with PR 7 — `esp-per-core-dirty.md` |
 | dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **DRAFT PR #294 open. THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
 | PerformanceControlChannel | — | not started; upstream's bug, frame as a question |
 | parallel pipeline | — | issue first, not a patch |
