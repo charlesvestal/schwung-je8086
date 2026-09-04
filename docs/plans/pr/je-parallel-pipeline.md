@@ -128,3 +128,38 @@ pipeline-only branch -- and the 223.8 s divergence did not appear at all in this
 build, which fits it being jitter-dependent.
 
 Cause not chased. Disclosed in the PR body rather than left to be found.
+
+## The 176 s transient: four causes ELIMINATED, cause still unknown
+
+Distinct from the 223.8 s nondeterminism. On the integrated build BOTH configs
+are deterministic -- 3-stage self-identical over 562 s, spanning the event -- so
+this is a REPRODUCIBLE difference between pipeline and serial, not a race. That
+is what made it worth chasing: a deterministic bug is tractable where the other
+was not.
+
+What it is: 731 ms starting at 175.994 s, 0.35% of bytes, RMS ratio 0.0002
+(-74 dB, ~8 counts on 24-bit samples), then EXACT re-convergence at the same
+shift. Sits at the demo's patch change to `[5:Feedbacker]`.
+
+Ruled out by experiment:
+
+| hypothesis | test | result |
+|------------|------|--------|
+| delivery delay too tight | delay 2 -> 8 -> 64 | same divergence byte every time |
+| control write applied a sample early/late | apply-time bias -1/0/+1 | 0 provably correct; +/-1 diverges at 0.0 s |
+| handoff word set too narrow | {3,6,8} -> {10,10,10} | same divergence byte |
+| control-write ring overflow | instrumented occupancy | peak 14 of 8192, zero overflow |
+
+**The bias test is the useful one.** Shifting when a forwarded write takes effect
+by ONE sample breaks the stream immediately, which proves the existing stamping
+is exactly right -- and kills the most attractive remaining theory.
+
+Still open: something during a patch load differs between running ASICs in one
+thread and running them staged. Not the handoff payload, not the write timing,
+not the delay. Next place to look is the ESP recompile path -- `genProgramIfDirty`
+counts down three samples on the OWNING stage's clock, and a patch load is
+exactly when that fires.
+
+**Iteration note:** a 120 s run reaches ~235 s of audio at 3 stages but only
+~95 s at serial (0.83x). The serial reference needs ~260 s. Getting that wrong
+compares against a file that never reached the event.
