@@ -2,7 +2,7 @@
     "id": "jp8000",
     "name": "JE-8086",
     "abbrev": "JP",
-    "version": "0.5.1",
+    "version": "0.5.2",
     "description": "JE-8086 SuperSaw synth emulator (Gearmulator)",
     "author": "dsp56300/gearmulator (port: charlesvestal)",
     "dsp": "dsp.so",
