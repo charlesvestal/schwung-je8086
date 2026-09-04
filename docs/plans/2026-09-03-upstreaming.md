@@ -177,11 +177,162 @@ Three things reviewers will and should ask:
   fixed and tiny but a host should be told. This is the one functional gap.
 - **x86 desktop is unmeasured** for the engine optimizations. Apple Silicon says
   ~0; a desktop is architecturally closer to that than to an A72.
-- **Two instances in one process** is untested with the pipeline.
+- ~~Two instances in one process is untested~~ -- MEASURED: two work at 2
+  stages each with pinning disabled, three do not. See above. The remaining
+  issue is that `JE_PIPELINE_CORES` cannot express per-instance affinity.
 - `performance_select` remains nondeterministic in the render path; the fixed
   delay work suggests why (unbounded run-ahead) but it has not been retested.
 
 ## Measurement traps
+
+**Size the pipeline to leave the HOST a core.** On a 4-core Pi at 48 kHz/1024,
+serial is 0.7x, three stages 1.8x, and four stages **1.5x** -- four is slower
+than three, because the fourth stage takes the core the host's own audio thread
+and GUI need. The Ardour launch scripts pinned four stages to cores 0,1,2,3 and
+the result was continuous starvation: Ardour sat at 185% CPU with the Pi at
+80.8 C and `throttled=0x80000` (soft temperature limit tripped). Starvation that
+deep is heard as PITCHED-DOWN AND SLUGGISH audio, which sounds exactly like a
+sample-rate mismatch and is not one.
+
+**Rule out the rate mismatch by measuring pitch, not by listening.** The device
+advertises a single supported samplerate (88200), so `getDeviceSamplerate()`
+cannot return anything else and the resampler cannot be bypassed -- but that is
+an argument, not evidence. The evidence is rendering the same MIDI through the
+CLAP at 48 kHz and 88.2 kHz, serial and at 2/3/4 stages, and measuring the
+fundamental: all five give E4 at 330.5 Hz (MIDI 64.04) with matching peaks. A
+patched `clap-trap notes` (its `-o` writes no audio upstream) does this headless.
+
+**The plugin runs clean in a DAW, with the pipeline sized to leave a core.**
+Ardour 8.12 on the Pi, session loaded, engine running, three stages on cores
+1,2,3 at `JE_PIPELINE_RTPRIO=70` (below Ardour's own audio thread at 78),
+48 kHz / 1024 frames / 3 ALSA periods. Measured from `/proc/<tid>/stat` over
+10 s: stage threads 67.5% / 67.4% / 44.3% of a core, Ardour's RT-main 13.1%,
+**0 xruns** over two minutes, 71 C. No stage saturated.
+
+**`ps` %CPU is a LIFETIME AVERAGE and re-runs the boot trap.** The same process
+read 187% from `ps` and ~18% instantaneous moments after startup, because the
+plugin's ~60 s of snapshot load and JIT warm-up is averaged in forever. Use
+`top -H` deltas or `/proc/<tid>/stat`, not `ps`.
+
+**Ardour can be driven headlessly, which is how the above was measured.** It
+never saved engine settings (`<AudioMIDISetup/>` stayed empty through every
+kill), so it re-prompted every launch. Writing an `<EngineState backend="ALSA"
+... n-periods="3"/>` under `<AudioMIDISetup><EngineStates>` in
+`~/.config/ardour8/config` plus `try-autostart-engine=1` starts the engine with
+no dialog. One gotcha: a previous kill leaves a `<session>.pending` file and
+Ardour then blocks on a **Crash Recovery** dialog before loading anything --
+under Xvfb that looks like a hang. `xdotool search --name . getwindowname %@`
+names the blocking window.
+
+**BOTH FORMATS RUN LIVE IN REAPER. This is the headline evidence for PR 9.**
+Verified 2026-09-04 on the Pi 4B, REAPER 7.39 aarch64, ALSA plughw:0,0, 3
+periods, RT priority 70, played from an Arturia Minilab3.
+
+Offline render through REAPER (`-new script.lua`, ReaScript builds the project
+and renders, so the verdict is a wav and not a meter), same C-major chord:
+
+| format | duration | peak | rms | fundamental |
+|--------|----------|------|-----|-------------|
+| VST3 | 7.00 s | 0.332 | 0.097 | 261.9 Hz = MIDI 60.02 |
+| CLAP | 7.00 s | 0.353 | 0.099 | 261.9 Hz = MIDI 60.02 |
+
+REAPER finds both formats unaided (`reaper-clap-linux-aarch64.ini` and
+`reaper-vstplugins_arm64.ini` after one launch) -- no manual scanner run, unlike
+Ardour.
+
+Live, one instance, 3 stages pinned to cores 1,2,3 (core 0 left to REAPER):
+stage threads 68.7 / 68.6 / 47.3 % of a core, REAPER ~33%, total 212% of 400%.
+User-confirmed playing with no audible underruns.
+
+**Two instances fit; three do not.** Concurrent `clap-trap bench`, idle box,
+48 kHz / 1024, each column one instance (>= 1.0x means it keeps up):
+
+| configuration | per-instance RT factor |
+|---------------|------------------------|
+| 1 x 2 stages | 1.7x |
+| 1 x 3 stages | 1.8x |
+| **2 x 2 stages** | **1.3x, 1.3x** |
+| 2 x 3 stages | 0.8x, 1.1x |
+| 3 x 2 stages | 0.8x, 0.6x, 0.7x |
+
+Confirmed in REAPER, both instances armed and audible: stage CPU 83.2/61.0 and
+83.2/61.0, total 302% of 400%, REAPER's Performance Meter steady at 75%
+(range 73-77%), user-confirmed clean. **This closes the "two instances in one
+process is untested" gap** listed under Known gaps.
+
+**`JE_PIPELINE_CORES` IS PROCESS-WIDE AND MUST BE FIXED BEFORE PR 9.**
+`core(s)` indexes the list by STAGE, so two instances in one host both pin to
+the same cores and leave the rest of the machine idle. Two instances only work
+with the variable UNSET (`pinCore(-1)` no-ops). An env var cannot express
+per-instance affinity; either drop pinning from the upstream patch or move it
+behind an API the host drives.
+
+**Load is flat: notes cost ~5%.** 297% silent vs 302.5% with a chord held. The
+emulator runs the whole H8S + 4 ASICs continuously, so there is no polyphony
+spike -- worth stating in the PR, it is unusual and it makes the budget easy.
+
+**A host's per-plugin CPU readout badly understates this plugin.** REAPER shows
+each instance at 3.3% FX CPU while it actually costs ~1.4 cores, because REAPER
+only times what happens inside `process()` on its audio thread and the pipeline
+does the work on its own threads. Quote the host's OVERALL cpu figure, never the
+per-FX one. (This is also an argument reviewers may raise against the design.)
+
+**Two more upstream bugs found, both in `jeController.cpp`, both from
+`902d06adc` (dsp56300, "merge JE8086"), verified an ancestor of
+dsp56300/gearmulator main:**
+- `PerformanceControlChannel: sendChange(0x11)  // off` -- 17 is out of range for
+  a parameter documented "1 - 16, Off", so the firmware rejects it and the
+  channel stays on 16. `RemoteControlChannel` next door genuinely does take 17,
+  which is what makes them look interchangeable.
+- `RemoteControlChannel` is set to 0 ("channel 1") for a new savestate while the
+  code comment says "Set remote channel to 3" and the JSON `default` is 2 ("3").
+  Channel 1 collides with the Upper part, which also defaults to MIDI CH 1, so
+  channel 1 is consumed by the remote/keyboard path -- it goes through KEY MODE
+  (SPLIT) and the arpeggiator instead of addressing Upper directly. Setting it
+  to 3 gives the clean Upper=1 / Lower=2 / remote=3 layout the comment intended.
+These are small, independently verifiable, need no JP-8000 performance
+knowledge, and are good early PRs.
+
+**OPEN: the VST3 produces SILENCE in Ardour, and it is not the pipeline.**
+The plugin loads, its GUI is alive (LCD reads the loaded performance, ROM
+loaded), Ardour's MIDI meter shows notes arriving at velocity 100 -- and the
+track's audio peak stays at -inf. Reproduced with the pipeline at 3 stages AND
+with `JE_NOPIPE=1` (serial, one JeThread), so our parallel work is exonerated.
+The same plugin as CLAP in clap-trap renders correct-pitch audio at 48 kHz in
+every configuration, so it is specific to the VST3-in-Ardour path. Not root
+caused. Earlier in the day the same VST3 did emit (pitched-down) audio in
+Ardour, so it is not a permanent property of the binary.
+
+Two dead ends recorded so they are not re-run: the missing `Latency set to N
+samples at 88200 Hz` / `Resampler input latency` lines in Ardour's log are NOT
+evidence the resampler is unconfigured -- they are stdio buffering in a host
+that never exits, and the plugin window displays a computed 25.81 ms latency,
+which only `updateDeviceLatency()` produces. And `setLogFunc(&noLoggingFunc)`
+in `pluginProcessor.cpp` is behind `#ifdef ZYNTHIAN`, so it is not suppressing
+them either.
+
+**Ardour operational traps, all self-inflicted and all costly.**
+- `ps` %CPU is a LIFETIME AVERAGE; it read 187% where `top -H`/`/proc` read 18%,
+  because the plugin's ~60 s JIT warm-up never ages out. Use `/proc/<tid>/stat`.
+- Swapping the `.so` inside a `.vst3` bundle poisons `~/.cache/ardour8/vst/*.v3i`
+  and writes `scan-result="2"` into `plugin_metadata/scan_log`; Ardour then says
+  **Missing Plugins** even after the original binary is restored. Ardour's own
+  in-process scan keeps failing; running
+  `LD_LIBRARY_PATH=/usr/lib/ardour8 /usr/lib/ardour8/ardour-vst3-scanner -f <bundle>`
+  succeeds and rewrites the cache. Never leave a second `.so` in the bundle.
+- `plugin-scan-timeout` defaults to 150 = **15 s**; this plugin needs ~60 s to
+  instantiate.
+- Killing Ardour leaves `<session>.pending`, and the next launch blocks on a
+  **Crash Recovery** dialog that under Xvfb looks exactly like a hang. Check with
+  `xdotool search --name . getwindowname %@`.
+- A truncated port label lies: `Minilab... LV (In)` is `Minilab3 **ALV**`, an
+  Arturia control port that carries no keys, not `Minilab3 MIDI`.
+
+**The headless path is verified end to end.** `jp8000_live` with MIDI fed through
+a FIFO and audio teed to a file by an ALSA `type file` plugin -- no keyboard and
+no listener required -- renders E4 at MIDI 63.95 with **0 xruns**, block time
+p50 1.27 ms / p99.9 1.60 ms against a 2.90 ms budget. One artifact to chase:
+a 105-sample full-scale burst at 0.305 s, at boot, before any note.
 
 Three real mistakes made while producing the numbers above. Anyone continuing
 this should know them.
