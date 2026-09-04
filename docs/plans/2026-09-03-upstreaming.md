@@ -92,6 +92,65 @@ Off"). It has no entry in `parameterDescriptions_je.json`, so the only range
 evidence is the header comment plus our own probing, and the firmware knowledge
 is theirs. Frame as "this looks wrong, here is the measurement, please confirm".
 
+## The Multicore DSP setting -- IMPLEMENTED, uncommitted in the submodule
+
+Written 2026-09-04 and building at time of writing. This is the "belongs in the
+plugin's own settings" that `jeLib/device.cpp` asked for in its own comment.
+
+It follows `canModifyDspClock()` exactly: the DEVICE declares the capability, and
+the SHARED DSP/Audio settings panel shows the control when the capability is
+there and hides it otherwise. That precedent matters for the PR -- it is the
+house pattern for a device-specific control in a shared panel, and it is in the
+same file we are editing.
+
+| file | change |
+|------|--------|
+| `framework/synthLib/device.h` | `DeviceCreateParams::dspThreads`; `virtual uint32_t getMaxDspThreads() const { return 1; }` |
+| `ronaldo/je8086/jeLib/device.h/.cpp` | override -> 4; pipeline built from `_params.dspThreads`; `pipelineDelay()`; both latency getters |
+| `framework/juce/jucePluginLib/processor.h/.cpp` | `getMaxDspThreads()` proxy, `getDspThreads()`, `virtual setDspThreads()`, `m_dspThreads` |
+| `framework/juce/jucePluginEditorLib/pluginProcessor.h/.cpp` | `setDspThreads` override persisting to config -- a line-for-line mirror of `setLatencyBlocks` |
+| `ronaldo/je8086/jeJucePlugin/jePluginProcessor.cpp` | reads `dspThreads` config in ctor; sets `params.dspThreads` in `createDevice()` |
+| `framework/juce/jucePluginEditorLib/settingsDspAudio.h/.cpp` | the control + `updateDspThreadButtons()`; hidden unless `getMaxDspThreads() > 1` |
+| `framework/juce/jucePluginData/tus_settings_dspaudio.rml` | `containerDspThreads` + clonable `dspThreadsEntry` row |
+
+**The UI reads:** heading `Multicore DSP (threads)`, options `Off (default)`,
+`2`, `3`, `4`. Value 1 is skipped -- one thread IS Off, and offering both would
+be two labels for one state.
+
+**"threads" not "cores" was a deliberate choice** and is worth arguing in the PR
+rather than settling here. Users think in cores; the code thinks in stages, and
+they are 1:1 in practice but not by definition.
+
+**Per-option hints were REMOVED on purpose.** An earlier draft read
+`3 (recommended: leaves a core for the host)`. That advice encodes our four-core
+Pi, and this panel is shared by every synth on every machine, where it would be
+wrong. If we want guidance it belongs in documentation, not in a shared label.
+
+**Changing it shows a warning and takes effect on reload**, because the thread
+count is fixed at device creation -- it determines the reported latency, and a
+plugin that changes latency mid-session breaks hosts. Same reasoning, and nearly
+the same wording, as the existing Latency buttons.
+
+**THE ENV BRANCH MUST BE STRIPPED FROM THE PR.** `jeLib/device.cpp` now reads:
+
+    if (_params.dspThreads > 1)        <- upstream path, keep
+        ...
+    else if (getenv("JE_PIPELINE"))    <- local only, DELETE for upstream
+
+The `else if` is what keeps our Move build, `bench_je*`, `jp8000_render`,
+`jp8000_live` and `play.sh` working, none of which go through plugin settings.
+Deleting it upstream is the whole point of PR 9's "no env vars" decision, and
+forgetting to delete it would ship exactly the interface we argued against.
+
+**Delay dropped from 64 to 2 samples** (`g_pipelineDelaySamples`), the minimum
+that covers the samples in flight. Our tooling passed 64 explicitly and no
+longer does.
+
+**Nothing here is committed.** The gearmulator submodule's own CLAUDE.md says
+"Do NOT commit without explicit user approval" and "Do NOT include
+Co-authored-by trailers" -- both apply to every commit we make in that tree, and
+the second differs from this repo's convention.
+
 ## The PRs
 
 Ours are bundled by discovery order, not by what upstream should review, so most
