@@ -131,8 +131,15 @@ hidden until advanced options are on -- and turning those on raises its own
 "may cause instability" confirmation. That is defensible (DSP Clock, the closest
 analogue, is also advanced) but it is a real decision: on an SBC this setting is
 the difference between unusable and usable, and burying it behind two
-confirmations is friction for exactly the user who needs it. Worth raising in
-the PR.
+confirmations is friction for exactly the user who needs it.
+
+DECIDED 2026-09-04: leave it advanced, raise it in the PR rather than settle it
+here. Note that NEITHER the checkbox nor its confirmation is ours -- the
+"Changing these settings may cause instability" box is dsp56300's, in
+`settings.cpp` (`fb01c9dda`, file untouched by us), and `settings-advanced`
+already gated `containerDspClock` in the same rml before we edited it. Our diff
+to that file is +14/-0. So the question upstream is only "is this an advanced
+setting", and dropping one class attribute moves it beside Latency with no gate.
 
 **Verified end to end, not just rendered:** clicking `3` checks it, clears
 `Off`, raises the warning, and writes `dspThreads" val="3"` into
