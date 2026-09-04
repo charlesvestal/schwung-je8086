@@ -119,9 +119,39 @@ sample cadence -- are unchanged.**
 
 **Verify:** bit-exact hashes, and its own timing figure.
 
-### PR 6 -- timer event horizon
-**Split from `787c8dfe`**: `source/cpu/h8s/h8sdevices.hpp` plus
-`instrStartCycles` in `h8s.hpp`. The largest single engine win.
+### PR 6 -- timer event horizon  [DONE: branched + measured]
+
+Branch `pr/h8s-timer-event-horizon`, commit `5f03f84b`, forked from
+`upstream-gearmulator/main`. 61 insertions across 2 files (vs `787c8dfe`'s 218).
+
+**MEASURED 2026-09-04 and it is +6%, NOT "the largest single engine win"** --
+that claim was carried in these docs unverified and is now retracted. Upstream's
+own `jeTestConsole` on an idle Pi 4B, counterbalanced B,A,A,B:
+
+| position | build | speed | wav bytes |
+|----------|-------|-------|-----------|
+| 1st | before | 43% | 68,135,468 |
+| 2nd | after  | 45% | 71,887,916 |
+| 3rd | after  | 45% | 71,518,508 |
+| 4th | before | 42% | 67,905,068 |
+
+`after` wins in both middle positions; `before` reads 43% first and 42% last,
+consistent with the 50.6 -> 58.4 C drift. The wav sizes corroborate from an
+independent measure: 5.4% more audio rendered in the same wall clock.
+
+The 43% baseline independently reproduces the "stock upstream, serial 0.433x" in
+the companion doc, measured with a different harness -- good cross-check.
+
+**Bit-exact, verified properly.** Each run is killed by a wall-clock timeout, so
+the faster build writes MORE audio and the SHA-256s differ for a reason that has
+nothing to do with correctness. Comparing the shorter file as a PREFIX of the
+longer (`cmp -n <size> -i 44:44`) shows all 68,135,424 audio bytes identical.
+Do not report raw hashes from timeout-truncated runs.
+
+**Consequence: the flagship PR is probably NOT this one.** If the timer horizon
+is 6% and the whole engine bundle is 0.433 -> 0.800 (+85%), something else does
+nearly all the work -- likely the dense ARM64 emitter or ESP dirty tracking.
+Measure each before claiming; do not guess which.
 
 Correctness argument, already verified once: `timers.tick()` runs AFTER
 `emu.step()`, so the old code updated to end-of-instruction cycles, and
