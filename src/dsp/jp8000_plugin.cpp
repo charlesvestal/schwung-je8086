@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <strings.h>
 #include <cmath>
 #include <cstdint>
@@ -922,7 +923,26 @@ static void child_drain_midi_out(jp8000_shm_t *shm, jeLib::Je8086 &je, std::vect
             child_image_from_dt1(shm, e.sysex.data(), (int)e.sysex.size());
 }
 
-static bool child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
+/* What the firmware costs to SWALLOW a byte, in 88.2 kHz samples.
+ *
+ * jeLib hands host MIDI to synthLib::MidiRateLimiter at the real MIDI baud
+ * rate -- 3125 bytes/s against an 88.2 kHz sample clock -- and inserts a 21 ms
+ * pause after any sysex longer than 100 bytes (je8086.cpp: setDefaultRateLimit,
+ * setSysexPause(0.021f), setSysexPauseLengthThreshold(100)). So a whole temp
+ * performance, 588 bytes in five messages of which two are over the threshold,
+ * needs ~230 ms of EMULATED time before the firmware has seen the last byte --
+ * and the rate limiter is clocked by onReceiveSample, so that time only passes
+ * while the emulator is actually producing audio. */
+static constexpr int      JE_SYSEX_PAUSE_THRESHOLD = 100;
+static constexpr int64_t  JE_SYSEX_PAUSE_SAMPLES   = 88200 * 21 / 1000;   /* 1852 */
+
+static int64_t sysex_settle_samples(int64_t bytes, int64_t long_msgs) {
+    return bytes * 88200 / 3125 + long_msgs * JE_SYSEX_PAUSE_SAMPLES;
+}
+
+/* Returns how long, in 88.2 kHz samples, the firmware needs to clock in
+ * everything just handed over; 0 when there was nothing. */
+static int64_t child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
     /* Off unless armed. This is the child process, which is not the SPI
      * callback, so a printf here is allowed -- and it is the only place the
      * bytes we hand the firmware can be read. A parameter write's read-back
@@ -931,9 +951,10 @@ static bool child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
     static const bool trace = getenv("JP_SYSEX_LOG") != nullptr;
     uint8_t m[JP_SX_MAX_MSG];
     int len;
-    bool sent = false;
+    int64_t bytes = 0, long_msgs = 0;
     while ((len = sx_ring_pop(shm, m, sizeof(m))) > 0) {
-        sent = true;
+        bytes += len;
+        if (len > JE_SYSEX_PAUSE_THRESHOLD) long_msgs++;
         if (trace) {
             fprintf(stderr, "[jp sysex-out %2d]", len);
             for (int i = 0; i < len; i++) fprintf(stderr, " %02X", m[i]);
@@ -941,7 +962,7 @@ static bool child_pump_sysex_ring(jp8000_shm_t *shm, jeLib::Je8086 &je) {
         }
         child_send_sysex(je, m, len);
     }
-    return sent;
+    return bytes ? sysex_settle_samples(bytes, long_msgs) : 0;
 }
 
 /* System settings the editor needs, sent once at boot (what the JUCE
@@ -1153,7 +1174,8 @@ static bool child_serve_load(jp8000_shm_t *shm, const child_banks_t &banks, jeLi
     const std::vector<jpbank::Bank> &list = kind ? banks.perf : banks.patch;
     if (b >= 0 && b < (int)list.size() && i >= 0 && i < (int)list[b].presets.size()) {
         const auto &preset = list[b].presets[i];
-        vlog("[child] load %s bank %d #%d '%s' part=%d", kind ? "perf" : "patch", b, i, preset.name.c_str(), part);
+        vlog("[child] load %s bank %d #%d '%s' part=%d (ring=%d/%d)", kind ? "perf" : "patch",
+             b, i, preset.name.c_str(), part, audio_ring_available(shm), shm->audio_throttle);
         for (const auto &src : preset.msgs) {
             jpbank::Msg m = src;
             const uint32_t addr = jpbank::dt1_addr(m);
@@ -1490,11 +1512,30 @@ static void child_main(jp8000_shm_t *shm) {
     const char *await_env = getenv("JP_AWAIT_TEMP_MS");
     const uint64_t AWAIT_TEMP_US = (uint64_t)(await_env ? atoi(await_env) : 3000) * 1000ull;
     uint64_t awaiting_until = 0;
-    /* ~450 ms of emulated time at 88.2 kHz: comfortably past the ~180 ms a
-     * whole-performance restore takes to clock in, and a knob edit is 13
-     * bytes, so a quiet slot is not spun for long. */
-    const uint32_t SYSEX_SETTLE_STEPS = 160000;
-    uint32_t sysex_settle = 0;
+    /* COUNT THE SETTLE IN SAMPLES THE EMULATOR PRODUCED, NOT IN LOOP PASSES.
+     *
+     * This used to be a countdown of 160000 loop iterations, described as
+     * "~450 ms of emulated time at 88.2 kHz" -- which assumed one pass of this
+     * loop makes one sample. It does not: `[child] pre-fill done,
+     * audio_ring=882, steps=21903` on the device is 24.8 passes per sample, so
+     * the countdown was really ~73 ms, a THIRD of the ~230 ms a whole-
+     * performance restore needs to clock in. And the ratio is not a constant --
+     * it moves with the pipeline split and with how hard the stages are being
+     * starved -- so no iteration count can be right on both a Pi and a Move.
+     *
+     * stage[0].samples_produced is the emulator's own sample clock (bumped in
+     * g_je_gram_produce, i.e. once per sample handed down the pipeline), so a
+     * deadline expressed against it means what the comment always claimed. */
+    int64_t settle_until = 0;
+    /* A load is only real once the firmware has READ it, and how long that
+     * takes depends on how much emulated time the child gets -- which on a busy
+     * slot with a full audio ring is a fraction of real time. Saying so in the
+     * log is the difference between diagnosing "the preset never arrived" and
+     * guessing at it; "I load a performance and I still hear the old one" is
+     * what the failure sounds like, and it looks identical from the front to a
+     * browser row that simply never loaded. */
+    uint64_t load_started_us = 0;
+    int64_t  load_started_samples = 0;
     auto now_us = []() -> uint64_t {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
         return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
@@ -1541,9 +1582,21 @@ static void child_main(jp8000_shm_t *shm) {
         if (awaiting_until && (!shm->temp_pending || now_us() >= awaiting_until))
             awaiting_until = 0;
 
+        /* want_temp_refresh BELONGS HERE.
+         *
+         * Without it, asking the firmware to dump its temp did nothing at all
+         * on an idle slot: the ring is full, nothing else is pending, so the
+         * loop slept at the line below and never reached the check that acts
+         * on the flag. Measured on the device -- `temp_refresh=1` alone
+         * produced no request and no dump; the same call with a param write
+         * beside it, which made sx_ring_available non-zero, produced both
+         * immediately. Every restore's confirmation rides on this flag. */
+        const int64_t samples_now = shm->stage[0].samples_produced;
+        const bool settling = samples_now < settle_until;
         const bool ui_pending = (shm->load_seq != shm->load_done)
                               || awaiting_until != 0
-                              || sysex_settle > 0
+                              || settling
+                              || shm->want_temp_refresh
                               || sx_ring_available(shm) > 0
                               || midi_fifo_available(shm) > 0;
 
@@ -1571,7 +1624,11 @@ static void child_main(jp8000_shm_t *shm) {
             if (nu - shm->last_render_us > 50000ull) shm->ring_read = shm->ring_write;
         }
 
-        if (child_process_midi(shm, *je)) child_request_temp(*je);
+        /* Through the flag, so it is ordered behind whatever is in the ring
+         * exactly like every other request -- and so a dump the firmware sends
+         * us unprompted is tracked as an arrival rather than landing on the
+         * image unannounced. */
+        if (child_process_midi(shm, *je)) shm->want_temp_refresh = 1;
         /* HANDING THE BYTES OVER IS NOT THE SAME AS THE FIRMWARE READING THEM.
          *
          * Keep stepping for a moment after any sysex, or the child drains the
@@ -1583,15 +1640,39 @@ static void child_main(jp8000_shm_t *shm) {
          * A preset load had this already, through the temp-dump wait; a raw
          * pump had nothing.
          *
-         * Counted in STEPS, not wall clock -- the opposite unit from the load
-         * wait next to it, and for a reason. That one has a real completion
-         * signal (the temp dump arriving) and only needs a ceiling, so wall
-         * clock is right. This one has no completion signal, so the bound IS
-         * the duration, and what has to elapse is EMULATED time: ~560 bytes at
-         * 31250 baud is ~180 ms of it. A wall-clock 400 ms looked equivalent
-         * and left the restore half-applied, because an unthrottled child does
-         * not run at 1x. */
-        if (shm->want_temp_refresh) {
+         * Counted in EMULATED SAMPLES, not wall clock -- the opposite unit
+         * from the load wait next to it, and for a reason. That one has a real
+         * completion signal (the temp dump arriving) and only needs a ceiling,
+         * so wall clock is right. This one has no completion signal, so the
+         * bound IS the duration, and what has to elapse is emulated time: the
+         * rate limiter only advances while the emulator produces audio. A
+         * wall-clock 400 ms looked equivalent and left the restore half
+         * applied, because the child does not run at 1x. The length is
+         * computed from the bytes actually handed over, so a 13-byte knob edit
+         * costs 4 ms of it and a whole performance costs ~230 ms. */
+        if (const int64_t need = child_pump_sysex_ring(shm, *je))
+            settle_until = samples_now + need;
+
+        /* ASK AFTER TELLING, NOT BEFORE.
+         *
+         * This block used to sit ABOVE the pump, so on any iteration where the
+         * parent had both filled the ring and raised the flag -- which is what
+         * a restore does, ring first then flag -- the dump REQUEST went into
+         * the emulator's MIDI queue ahead of the restore's own DT1s. The
+         * firmware would then be free to answer out of the image it had not
+         * been given yet, and "confirmed by the firmware" would confirm the
+         * performance we were replacing.
+         *
+         * Draining the ring first is what actually fixes it: both go through
+         * addMidiEvent, so once the DT1s are in, the request is behind them in
+         * the same serial stream and the firmware must parse them first.
+         * Waiting out the settle on top costs a few hundred ms of emulated
+         * time on a restore and removes the question of what the emulated SCI
+         * does when a 528-byte reply and a 588-byte write overlap. */
+        /* settle_until is re-read, not the `settling` computed above: the pump
+         * on the line before this may have just moved it. */
+        if (shm->want_temp_refresh && sx_ring_available(shm) == 0
+            && samples_now >= settle_until) {
             shm->want_temp_refresh = 0;
             shm->temp_rx_mask = 0;
             shm->temp_pending = 1;
@@ -1599,11 +1680,27 @@ static void child_main(jp8000_shm_t *shm) {
             child_request_temp(*je);
             awaiting_until = now_us() + AWAIT_TEMP_US;
         }
-        if (child_pump_sysex_ring(shm, *je)) sysex_settle = SYSEX_SETTLE_STEPS;
-        if (sysex_settle > 0) sysex_settle--;
         /* Off the per-step path: a load is a few hundred bytes of DT1. */
         if ((++loop_iter & 63) == 0) {
-            if (child_serve_load(shm, banks, *je)) awaiting_until = now_us() + AWAIT_TEMP_US;
+            if (child_serve_load(shm, banks, *je)) {
+                awaiting_until = now_us() + AWAIT_TEMP_US;
+                load_started_us = now_us();
+                load_started_samples = samples_now;
+            }
+            if (load_started_us && !shm->temp_pending) {
+                vlog("[child] load confirmed after %llu ms, %lld emulated samples",
+                     (unsigned long long)((now_us() - load_started_us) / 1000),
+                     (long long)(samples_now - load_started_samples));
+                load_started_us = 0;
+            } else if (load_started_us && now_us() - load_started_us > AWAIT_TEMP_US) {
+                vlog("[child] LOAD NOT CONFIRMED after %llu ms -- only %lld emulated samples, "
+                     "ring=%d/%d. The firmware never finished reading it; the previous "
+                     "preset is still what sounds.",
+                     (unsigned long long)((now_us() - load_started_us) / 1000),
+                     (long long)(samples_now - load_started_samples),
+                     audio_ring_available(shm), shm->audio_throttle);
+                load_started_us = 0;
+            }
             child_drain_midi_out(shm, *je, midi_scratch);
         }
 
@@ -1716,17 +1813,13 @@ static void* boot_thread_func(void *arg) {
              * set reloads every module, so this is the path a set switch
              * takes.
              *
-             * Ask the firmware to dump its temp back and wait for it here.
-             * This thread is SCHED_OTHER and nobody is listening to the slot
-             * yet, so waiting is free; the alternative -- hoping something
-             * else happens to drive the emulator soon enough -- is what the
-             * bug was. Bounded, because a firmware that never answers must
-             * still yield a usable slot. */
+             * state_apply has already asked the firmware to dump its temp
+             * back; wait for it here. This thread is SCHED_OTHER and nobody is
+             * listening to the slot yet, so waiting is free; the alternative --
+             * hoping something else happens to drive the emulator soon enough
+             * -- is what the bug was. Bounded, because a firmware that never
+             * answers must still yield a usable slot. */
             jp8000_shm_t *sh = inst->shm;
-            sh->temp_rx_mask = 0;
-            sh->temp_pending = 1;
-            SHM_STORE_FENCE();
-            sh->want_temp_refresh = 1;
             for (int i = 0; i < 400 && sh->temp_pending; i++) usleep(10000);
             fprintf(stderr, "JP-8000: state restore %s\n",
                     sh->temp_pending ? "NOT confirmed by the firmware (timed out)"
@@ -1969,14 +2062,52 @@ static const uint8_t *state_img(jp8000_shm_t *shm, int i, int *len, uint32_t *bl
     }
 }
 
-static int json_int_field(const char *s, const char *key, int fallback) {
+/* THE BLOB THAT COMES BACK IS NOT THE BLOB WE WROTE.
+ *
+ * state_get emits compact JSON. The chain host parses it -- `config = { state:
+ * JSON.parse(stateJson) }` in buildSlotPatchJson -- stores it as an OBJECT in
+ * the slot file, and writes that file pretty-printed. So what state_apply is
+ * handed on the way back in is the same data with two-space indentation and a
+ * space after every colon: `"temp": "4368...`, not `"temp":"4368...`.
+ *
+ * A module whose state is not valid JSON never sees this: the host keeps it as
+ * an opaque string and it round-trips byte for byte. Ours is JSON, so it does
+ * not.
+ *
+ * This is why a restore used to come back HALF applied. json_int_field already
+ * skipped the space, so mode/part/bank/patch/perf_bank/performance all landed
+ * and the browser pointed at the right row -- while the `strstr(s, "\"temp\":\"")`
+ * next to it missed, returned early, and left the synth on whatever the boot
+ * snapshot had: the row said "LD SANDSTORM  AZ" and the JP played "Chariots".
+ * The next autosave then serialized that boot image back over the good file,
+ * which is what made it permanent rather than a one-time glitch.
+ *
+ * So: never match a JSON field with a whitespace-exact pattern. Find the key,
+ * then step over the separator the way a parser would. */
+static const char *json_field(const char *s, const char *key) {
     char pat[32];
-    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
     const char *p = strstr(s, pat);
-    if (!p) return fallback;
+    if (!p) return nullptr;
     p += strlen(pat);
-    while (*p == ' ') p++;
-    return atoi(p);
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p != ':') return nullptr;
+    p++;
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+/* The value of a string field, positioned at the first character INSIDE the
+ * quotes. nullptr when the key is absent or does not hold a string. */
+static const char *json_str_field(const char *s, const char *key) {
+    const char *p = json_field(s, key);
+    if (!p || *p != '"') return nullptr;
+    return p + 1;
+}
+
+static int json_int_field(const char *s, const char *key, int fallback) {
+    const char *p = json_field(s, key);
+    return p ? atoi(p) : fallback;
 }
 
 static int hexval(char c) {
@@ -2053,9 +2184,8 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
 
     /* Before "temp", because a malformed temp block returns early and the
      * system settings are independent of it. */
-    const char *sy = strstr(s, "\"sys\":\"");
+    const char *sy = json_str_field(s, "sys");
     if (sy) {
-        sy += 7;
         int cnt = 0;
         for (int i = 0; i < JP_PARAM_COUNT; i++)
             if (jp_params[i].area == JP_AREA_SYSTEM) cnt++;
@@ -2081,9 +2211,14 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
         }
     }
 
-    const char *t = strstr(s, "\"temp\":\"");
-    if (!t) return;
-    t += 8;
+    const char *t = json_str_field(s, "temp");
+    if (!t) {
+        /* Loudly, because this is the failure that hid for a week: the UI
+         * fields above have already been applied, so the slot LOOKS restored
+         * while the synth is still on the boot snapshot. */
+        vlog("[state] blob has no readable \"temp\" -- sound NOT restored");
+        return;
+    }
     uint8_t temp[JP_TEMP_TOTAL_LEN];
     for (int i = 0; i < JP_TEMP_TOTAL_LEN; i++) {
         const int hi = hexval(t[i * 2]), lo = hi < 0 ? -1 : hexval(t[i * 2 + 1]);
@@ -2101,6 +2236,28 @@ static void state_apply(jp8000_instance_t *inst, const char *s) {
         shm->img_valid |= bit;
         off += len;
     }
+
+    /* ARM THE CONFIRMATION HERE, NOT AT ONE CALL SITE.
+     *
+     * A restore arrives on one of two paths and which one is a race: the chain
+     * host writes "state" right after create_instance, and whether that lands
+     * before or after ui_ready depends on how long the boot took. Traced on the
+     * device, the same hardware gave both -- `set_param state: ui_ready=0` on a
+     * set switch and `ui_ready=1` through the test harness.
+     *
+     * Only the first had any verification. The live path handed ~590 bytes of
+     * DT1 to the ring from the SPI callback and returned, leaving the image
+     * saying what we MEANT to restore rather than what the firmware took -- and
+     * the autosave then writes that optimistic image back to disk, which is how
+     * a restore that quietly failed becomes a saved file that is quietly wrong.
+     *
+     * Arming it in state_apply covers both. The boot thread additionally WAITS
+     * (it can afford to; the SPI callback cannot), but the request, the arrival
+     * mask and the settle that orders them are the same on either path. */
+    shm->temp_rx_mask = 0;
+    shm->temp_pending = 1;
+    SHM_STORE_FENCE();
+    shm->want_temp_refresh = 1;
     SHM_STORE_FENCE();
 }
 
@@ -2191,27 +2348,59 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         shm->audio_throttle = (int)(ms * 88.2f);
         return;
     }
+    /* SELECTING A BANK SELECTS ITS FIRST PRESET, AND LOADS IT.
+     *
+     * Back to row 0 first: the index is a position in THIS bank, and carrying
+     * it across landed at 40 in a bank of 32 -- an index with no row, so the
+     * name read as -1 and the browser showed nothing.
+     *
+     * Then LOAD it, which this used to skip. Every other row in the browser
+     * auditions the moment you land on it, so a bank step that moved the row
+     * and not the sound made the Preset line NAME SOMETHING THAT WAS NOT
+     * PLAYING: pick "LD SANDSTORM  AZ" out of one bank, step to the next, and
+     * the screen reads "AdagioBass   TUS" over the sound of Sandstorm. Reported
+     * as "I load a performance and I still hear the old one", which is exactly
+     * what it looks like from the front.
+     *
+     * Rapid steps are safe and cost one load, not one per bank: request_load
+     * only bumps load_seq, and the child reads load_bank/load_index when it
+     * gets there, so spinning through four banks serves the fourth. */
+    auto select_bank = [&](int target) {
+        if (inst->mode == 1) {
+            inst->perf_bank = target;
+            shm->perf_bank_req = target;
+            inst->performance = 0;
+            if (shm->perf_bank_count > 0 && shm->perf_bank_sizes[target] > 0)
+                request_load(inst, 1);
+        } else {
+            inst->bank = target;
+            shm->patch_bank_req = target;
+            inst->patch = 0;
+            if (shm->patch_bank_count > 0 && shm->patch_bank_sizes[target] > 0)
+                request_load(inst, 0);
+        }
+    };
     if (strcmp(key, "bank_list") == 0) {
         const bank_view v = bank_view_for(inst);
         if (v.count <= 0) return;
         const int target = clampi(atoi(val), 0, v.count - 1);
         *v.sel = target;
-        if (inst->mode == 1) { inst->perf_bank = target; shm->perf_bank_req = target; inst->performance = 0; }
-        else                 { inst->bank = target;      shm->patch_bank_req = target; inst->patch = 0; }
-        /* Back to the first row. The index is a position in THIS bank, and
-         * carrying it across meant landing at 40 in a bank of 32 -- an index
-         * with no row, so the name read as -1 and the browser showed nothing.
-         * Nothing is loaded by this: only setting patch/performance does that. */
+        select_bank(target);
         return;
     }
+    /* The two chain-param enums reach the same place. They used to be the odd
+     * ones out -- no row reset at all, so `perf_bank` into a smaller bank left
+     * the row past the end and `performance_name` answered <unavailable>. */
     if (strcmp(key, "bank") == 0) {
-        inst->bank = clampi(atoi(val), 0, shm->patch_bank_count > 0 ? shm->patch_bank_count - 1 : 0);
-        shm->patch_bank_req = inst->bank;
+        const int m = inst->mode; inst->mode = 0;
+        select_bank(clampi(atoi(val), 0, shm->patch_bank_count > 0 ? shm->patch_bank_count - 1 : 0));
+        inst->mode = m;
         return;
     }
     if (strcmp(key, "perf_bank") == 0) {
-        inst->perf_bank = clampi(atoi(val), 0, shm->perf_bank_count > 0 ? shm->perf_bank_count - 1 : 0);
-        shm->perf_bank_req = inst->perf_bank;
+        const int m = inst->mode; inst->mode = 1;
+        select_bank(clampi(atoi(val), 0, shm->perf_bank_count > 0 ? shm->perf_bank_count - 1 : 0));
+        inst->mode = m;
         return;
     }
     if (strcmp(key, "patch") == 0) {

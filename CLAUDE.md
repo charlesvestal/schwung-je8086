@@ -266,7 +266,83 @@ every module, so that is the path a set switch takes. The boot thread now asks
 the firmware to dump its temp back and WAITS for it before setting `ui_ready`
 (SCHED_OTHER, nobody listening to the slot yet, so waiting is free; bounded at
 4 s so a silent firmware still yields a usable slot). Verified byte-exact:
-528/528 with the slot never rendered.
+528/528 with the slot never rendered. The arming for that wait lives in
+`state_apply`, not at the call site -- see the live/boot race below.
+
+**THE BLOB THAT COMES BACK IS NOT THE BLOB WE WROTE.** `state_get` emits compact
+JSON; the chain host does `config = { state: JSON.parse(stateJson) }`
+(`buildSlotPatchJson`, shadow_ui.js) and writes the slot file PRETTY-PRINTED, so
+`state_apply` is handed `"temp": "4368...` -- with a space. It looked for it with
+`strstr(s, "\"temp\":\"")`, whitespace-exact, and missed; same for `"sys":"`.
+`json_int_field` next door already skipped the space, so every integer landed and
+only the sound did not: the browser pointed at "LD SANDSTORM  AZ" while the JP
+played "Chariots", because the temp performance was never sent and the synth was
+still on `boot.snap`. **The next autosave then serialized that boot image back
+over the good file**, which is what turned a restore glitch into a set that
+stayed wrong. Match JSON fields by finding the key and stepping over the
+separator (`json_field` / `json_str_field`), never with a fixed pattern.
+
+A module whose state is NOT valid JSON never sees this -- the host keeps it as an
+opaque string and it round-trips byte for byte. Ours is JSON, so it does not.
+
+**The four-cell control, run natively on a Mac with `plugin_params`.** Take a
+state blob from a slot holding performance 17 ("Sweepers"), pretty-print it the
+way the host does (`JSON.stringify(o, null, 2)`), feed it back with `!state=`,
+and compare the `temp` hex against the blob that was saved:
+
+| build | blob | `loaded_performance_name` | temp bytes wrong |
+|-------|------|---------------------------|------------------|
+| pre-fix | compact | Sweepers | 0/528 |
+| **pre-fix** | **pretty (what the host writes)** | **Chariots** | **143/528** |
+| fixed | compact | Sweepers | 0/528 |
+| fixed | pretty | Sweepers | 0/528 |
+
+The pre-fix pretty row still reports `"performance": 17` in its own state blob
+while playing the boot snapshot's "Chariots" -- the reported symptom exactly, and
+the reason a name-versus-name check could never find it. The compact rows are the
+control that says the pretty-printing is the trigger and nothing else changed.
+This needs no device: the plugin boots from `boot.snap` in 0.5 s on a Mac.
+
+**A restore arrives on one of two paths and which one is a RACE.** The host
+writes `state` right after `create_instance`, and whether that lands before or
+after `ui_ready` depends on how long the boot took: the same Move gave
+`set_param state: ui_ready=0` on a set switch and `ui_ready=1` through
+`plugin_params`. Only the first had any verification -- the live path pushed the
+DT1s from the SPI callback and returned, leaving the image saying what we MEANT
+to restore. `state_apply` now arms `temp_rx_mask`/`temp_pending`/
+`want_temp_refresh` itself so both paths are confirmed; the boot thread only adds
+the WAIT, which is the one thing the SPI callback cannot do.
+
+**`want_temp_refresh` has to be in `ui_pending` or it does nothing.** With the
+audio ring full and nothing else pending, the child slept at the top of the loop
+and never reached the check that acts on the flag -- so asking the firmware for a
+dump was a silent no-op on exactly the idle slot where it matters. Measured on
+the device: `temp_refresh=1` alone produced no RQ1 and no dump; the same call
+with a param write beside it (which makes `sx_ring_available` non-zero) produced
+both at once. Every restore's confirmation rides on this flag.
+
+**ASK AFTER TELLING.** The `want_temp_refresh` block used to sit ABOVE
+`child_pump_sysex_ring`, so on any pass where the parent had both filled the ring
+and raised the flag -- which is what a restore does, ring first then flag -- the
+dump REQUEST went into the emulator's MIDI queue ahead of the restore's own DT1s,
+and "confirmed by the firmware" could confirm the performance being replaced.
+Draining the ring first is the fix: both go through `addMidiEvent`, so the
+request ends up behind the data in the same serial stream. Traced before and
+after: `RQ1` then `DT1` became `DT1` then `RQ1` then a dump reading
+"LD SANDSTORM  AZ".
+
+**The sysex settle is EMULATED SAMPLES, not loop passes.** It was a countdown of
+160000 iterations documented as "~450 ms of emulated time at 88.2 kHz", which
+assumed one pass makes one sample. `[child] pre-fill done, audio_ring=882,
+steps=21903` says 24.8 passes per sample, so it was really ~73 ms -- a THIRD of
+the ~230 ms a whole performance needs to clock in -- and the ratio moves with the
+pipeline split and with how hard the stages are starved, so no iteration count is
+right on two machines. The deadline is now against
+`stage[0].samples_produced`, and its length is computed from the bytes actually
+handed over: `bytes * 88200 / 3125` plus 21 ms per message over 100 bytes, which
+are jeLib's own `setDefaultRateLimit` / `setSysexPause` /
+`setSysexPauseLengthThreshold` settings. A knob edit costs 4 ms of it, a whole
+performance ~230 ms.
 
 **Two probes lied about this before it was found**, both worth remembering.
 `temp_refresh` forces the child to step, so using it to ask "did the restore
@@ -283,10 +359,32 @@ as long as the dump is in flight, and `state_get` refuses too, which is a
 silently skipped autosave. The image stays readable and shows the last known
 values until the new ones arrive.
 
-**Selecting a bank resets the row to 0.** The index is a position in THIS bank;
-carrying it across landed at 40 in a bank of 32, an index with no row, so the
-name read as -1 and the browser showed nothing. It loads nothing -- only setting
-`patch`/`performance` does that.
+**Selecting a bank resets the row to 0 AND LOADS IT.** The index is a position in
+THIS bank; carrying it across landed at 40 in a bank of 32, an index with no row,
+so the name read as -1 and the browser showed nothing.
+
+Loading was the missing half. Every other row in the browser auditions the moment
+you land on it, so a bank step that moved the row and not the sound left the
+Preset line NAMING SOMETHING THAT WAS NOT PLAYING: pick "LD SANDSTORM  AZ" out of
+one bank, step to the next, and the screen reads "AdagioBass   TUS" over the sound
+of Sandstorm. It was reported as "I load a performance and I still hear the old
+one" -- which is what it looks like from the front, and is indistinguishable there
+from a preset load that failed to reach the firmware.
+
+`bank`/`perf_bank`, the two chain-param enums, reached none of this: no row reset
+at all, so stepping into a smaller bank left the row past the end and
+`performance_name` answered `<unavailable>`. All three keys now go through one
+`select_bank()`. Rapid steps cost one load, not one per bank -- `request_load`
+only bumps `load_seq` and the child reads `load_bank`/`load_index` when it gets
+there, so spinning through four banks serves the fourth. A restore does NOT take
+this path: `state_apply` sets `perf_bank_req` directly, because the blob carries
+its own temp bytes and a preset load would overwrite them.
+
+**A load is not real until the firmware has READ it**, and how much emulated time
+the child gets depends on the audio ring: on a busy slot it steps at a fraction of
+real time. `[child] load confirmed after N ms, N emulated samples` and its
+`LOAD NOT CONFIRMED` counterpart say which happened, with the ring depth, so the
+two failures that sound identical from the front can be told apart in the log.
 
 **Loading a PATCH obeys Edit Part** (`load_part`): Upper, Lower or Both, so one
 sound can be taken from a bank into one half of a split. A PERFORMANCE always
