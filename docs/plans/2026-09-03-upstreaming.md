@@ -59,6 +59,39 @@ them. Do not quote 1.85x to a desktop reviewer. x86 desktop is UNMEASURED.
 - Cross-platform: `sustained_c4` hashes the same on macOS/arm64 and Linux/arm64,
   so a reviewer can reproduce a hash rather than take our word.
 
+## Decisions for the upstream patch
+
+**Drop core pinning entirely.** It buys nothing and it is what breaks multiple
+instances. Measured on an idle Pi, two runs each:
+
+| configuration | run 1 | run 2 |
+|---------------|-------|-------|
+| 3 stages, pinned 1,2,3 | 1.8x | 1.8x |
+| 3 stages, unpinned | 1.7x | 1.8x |
+| 2 stages, pinned 0,1 | 1.7x | 1.5x |
+| 2 stages, unpinned | 1.7x | 1.7x |
+
+Identical within noise, and the pinned 2-stage case was WORSE once. Meanwhile
+`core(s)` indexes the list by stage and the env is process-wide, so two
+instances pin to the same cores; two instances only run with pinning off. No
+environment variable can express per-instance affinity, so this cannot be fixed
+as an env var -- it just goes.
+
+**Drop the env opt-in too; use the config the plugin already has.** The claim
+"a plugin has no other way to be told" was wrong. `jePluginProcessor.cpp`
+already does `getConfig().getIntValue("latencyBlocks", ...)` -- per-instance,
+persistent, and surfaceable in the UI, which is everything the environment is
+not. `jeLib` keeps `Je8086::requestParallelPipeline(...)` as the API and the
+CALLER decides; the env parsing in `device.cpp` stays local and never enters the
+PR.
+
+**`PerformanceControlChannel: sendChange(0x11)` -- submit it, but ask rather than
+assert.** The comment says "off" and off for this parameter is `0x10`; `0x11` is
+the encoding of the parameter next door (`RemoteControlChannel`, "1-16, All,
+Off"). It has no entry in `parameterDescriptions_je.json`, so the only range
+evidence is the header comment plus our own probing, and the firmware knowledge
+is theirs. Frame as "this looks wrong, here is the measurement, please confirm".
+
 ## The PRs
 
 Ours are bundled by discovery order, not by what upstream should review, so most
@@ -173,8 +206,16 @@ Three things reviewers will and should ask:
 
 ## Known gaps — disclose these
 
-- **`getExtraLatencySamples()` is not wired to the pipeline delay.** The delay is
-  fixed and tiny but a host should be told. This is the one functional gap.
+- **The pipeline delay is not reported to the host, and `getExtraLatencySamples()`
+  is the WRONG hook** -- it is the getter for what the host already set via
+  `setExtraLatencySamples()`. The right place is
+  `Device::getInternalLatencyMidiToOutput()` (currently a flat 4.5 ms) and
+  `getInternalLatencyInputToOutput()` (not overridden by je8086), which is what
+  `Plugin::updateDeviceLatency()` actually reads. Two lines. Fix it BEFORE
+  submitting rather than disclosing it: "we add latency and do not report it"
+  sinks a plugin PR on principle. Note the delay only needs to be 2 samples for
+  determinism -- our default of 64 is arbitrary and should drop to the minimum
+  upstream, which makes the question nearly moot.
 - **x86 desktop is unmeasured** for the engine optimizations. Apple Silicon says
   ~0; a desktop is architecturally closer to that than to an A72.
 - ~~Two instances in one process is untested~~ -- MEASURED: two work at 2
