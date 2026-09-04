@@ -117,6 +117,28 @@ same file we are editing.
 `2`, `3`, `4`. Value 1 is skipped -- one thread IS Off, and offering both would
 be two labels for one state.
 
+![the control](../images/multicore-dsp-setting.png)
+
+Screenshots for the PR, taken from the CLAP in REAPER on the Pi:
+`docs/images/multicore-dsp-setting.png` (the control),
+`multicore-dsp-settings-page.png` (in context under Latency / Output Gain /
+Resampler) and `multicore-dsp-warning.png` (the warning on change).
+
+**Reaching it: right-click the plugin background > Settings... > DSP & Audio,
+and tick "Enable Advanced Options".** The section carries
+`class="settings-advanced"`, copied from the DSP Clock container, so it is
+hidden until advanced options are on -- and turning those on raises its own
+"may cause instability" confirmation. That is defensible (DSP Clock, the closest
+analogue, is also advanced) but it is a real decision: on an SBC this setting is
+the difference between unusable and usable, and burying it behind two
+confirmations is friction for exactly the user who needs it. Worth raising in
+the PR.
+
+**Verified end to end, not just rendered:** clicking `3` checks it, clears
+`Off`, raises the warning, and writes `dspThreads" val="3"` into
+`.local/share/The Usual Suspects/JE8086/config/JE8086.xml`, which is what
+`createDevice()` reads back into `params.dspThreads`.
+
 **"threads" not "cores" was a deliberate choice** and is worth arguing in the PR
 rather than settling here. Users think in cores; the code thinks in stages, and
 they are 1:1 in practice but not by definition.
