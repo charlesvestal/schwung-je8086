@@ -22,14 +22,14 @@ instrumentation, none of our other 24 commits. Verify with
 
 | PR | branch | state |
 |----|--------|-------|
-| timer event horizon | `pr/h8s-timer-event-horizon` | **measured, ready** (+6%) — `h8s-timer-event-horizon.md` |
+| timer event horizon | `pr/h8s-timer-event-horizon` | **DRAFT PR #293 open** (+6%) — `h8s-timer-event-horizon.md` |
 | denormal FTZ | — | **dropped**, no measurable benefit — `denormal-ftz-dropped.md` |
 | MIDI printf | — | not started; reframed as hygiene, not performance |
 | H8S page bitmap | — | not started |
 | H8S wide access | — | not started; **depends on the page bitmap** |
 | a64::Assembler | — | not started |
 | ESP dirty tracking | `pr/esp-per-core-dirty` | split + built, **not yet measured** — measure with `patch_sweep`, not the demo |
-| dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
+| dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **DRAFT PR #294 open. THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
 | PerformanceControlChannel | — | not started; upstream's bug, frame as a question |
 | parallel pipeline | — | issue first, not a patch |
 
