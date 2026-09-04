@@ -182,6 +182,11 @@ the second differs from this repo's convention.
 
 ## The PRs
 
+The working checklist -- what to split, what to claim, and what must be
+MEASURED before each one is opened -- is `2026-09-04-pr-checklist.md`. The
+summaries below are the reasoning; that file is the procedure.
+
+
 Ours are bundled by discovery order, not by what upstream should review, so most
 of these need a commit split rather than a cherry-pick. `787c8dfe` alone carries
 four separate candidates.
