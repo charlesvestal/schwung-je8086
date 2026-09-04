@@ -31,7 +31,7 @@ instrumentation, none of our other 24 commits. Verify with
 | ESP dirty tracking | `pr/esp-per-core-dirty` | **#295 WITHDRAWN** — real but no user-visible benefit; revisit folded together with PR 7 — `esp-per-core-dirty.md` |
 | dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **DRAFT PR #294 open. THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
 | PerformanceControlChannel | — | not started; upstream's bug, frame as a question |
-| parallel pipeline | — | issue first, not a patch |
+| parallel pipeline | `pr/je-parallel-pipeline` | **DRAFT PR #297 open** — 2.14x on a Pi (0.42x -> 0.94x realtime), bit-exact on a fixed 2-sample delay — `je-parallel-pipeline.md` |
 
 ## Reusing a baseline between PRs
 
