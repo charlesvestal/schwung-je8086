@@ -211,8 +211,21 @@ carries them, not a regression and measured unreachable across the corpus
 unconditional, upstream will not want two ring layouts by architecture. The x64
 emitter takes `nextIsDmac` and ignores it -- say so.
 
-**Verify:** bit-exact hashes across the whole corpus, and its own A72 timing.
-This is the one where a reviewer may reasonably ask for more than we have.
+**MEASURED 2026-09-04 and it is the flagship: +65% on A72, +45% on M1, bit-exact
+over 378.7 s of audio including a program change.** Branch
+`pr/esp-dense-arm64-emitter`, commit `52735ea2`, 7 files. Full write-up in
+`pr/esp-dense-arm64-emitter.md`. The worry that it might cost a beefy machine
+something was tested directly and does not materialise -- the M1 gains 45%.
+
+One decision is still open and belongs to the maintainer: `ESP_IRAM_MIRROR` is
+aarch64-only on the branch, which this checklist elsewhere argues against. Lead
+the PR description with it.
+
+**The split is emitter-ONLY.** `bf974365` bundled the dense emitter with the
+generalised ASIC split for fork-parallel; `je8086devices.h` is untouched on the
+branch and the diff contains no thread, fork or pipeline code at all. Both
+measured binaries are single-threaded, so this is a SERIAL engine win and has
+nothing to do with PR 10.
 
 ### PR 10 -- the parallel ASIC pipeline
 **An ISSUE FIRST, not a patch.** This adds threads to a device library; the
