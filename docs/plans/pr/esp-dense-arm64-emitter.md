@@ -164,21 +164,33 @@ PR 6:
 Also dropped by hand: every `#ifdef JE_PROFILE` block, and the whole
 fork-parallel ASIC split — `je8086devices.h` is untouched on this branch.
 
-## Open question for the maintainer -- decide before opening
+## The arch gate is LOAD-BEARING -- our own checklist was wrong
 
-`ESP_IRAM_MIRROR` is `#if defined(__aarch64__)` on this branch, i.e. **two ring
-layouts by architecture**. Our own checklist says the opposite -- "keep
-`ESP_IRAM_MIRROR` unconditional, upstream will not want two ring layouts by
-architecture" -- and this split did not follow it.
+The checklist said "keep `ESP_IRAM_MIRROR` unconditional, upstream will not want
+two ring layouts by architecture." **Following that would ship broken x86-64.**
 
-The trade is real either way. Unconditional gives x86-64 the 512-entry buffers
-and the `mirrorFixup` call as well, which is a behaviour change on a platform we
-**cannot measure** (no hardware; Docker x86_64 on Apple Silicon is translation).
-Per-arch keeps x86-64 byte-for-byte as upstream has it today, at the cost of the
-divergence a maintainer may object to.
+The ring layout has to match the emitter, and the two emitters differ:
 
-Lead the PR description with this rather than waiting to be asked. It is the one
-decision in this change that is genuinely theirs.
+- `esp_jit_arm64.cpp` rebases the ring once and addresses every slot with an
+  immediate offset. There is no `#if` in it -- it REQUIRES the mirrored layout.
+- `esp_jit_x64.cpp` emits `and tempB, 0xff` for every access (lines 159, 280).
+  `bf974365` never taught it the mirror, so it REQUIRES the masked layout.
+
+Turn the mirror on for x86-64 without porting the mirrored addressing into the
+x64 emitter and the JIT indexes `(mem + iramPos) & 0xff` while the interpreter
+and host accessors index `(mem & 0xff) + iramPos` -- different slots whenever
+`iramPos > 0`, which is nearly always. That is incorrect by construction, not
+untested.
+
+Since the emitter is chosen by architecture, so is the layout, and
+`#if defined(__aarch64__)` is the correct expression of the coupling rather than
+a placeholder. With the mirror off, `ramIdx()` reduces to
+`(offset + iramPos) & IRAM_MASK` -- upstream's expression character for
+character -- `mirrorFixup()` returns immediately, and the buffers are 256 entries
+again. **x86-64 behaviour is unchanged, not merely untested.**
+
+Porting the mirror into the x64 emitter is a fair follow-up, as its own change
+with its own measurement, on hardware we do not have.
 
 ## Consequence for the other PRs
 
