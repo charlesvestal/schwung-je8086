@@ -91,3 +91,40 @@ Neither caused the divergence; both are genuine.
 `jeTestConsole` has no way to select a thread count, so measuring needs a
 one-line `JE_DSP_THREADS` hook in `params`. Keep it UNCOMMITTED -- the real
 selector is the plugin setting.
+
+## All four PRs stacked: 0.43x -> ~2x realtime on a Pi
+
+Branch `integration/all-prs` in the submodule (upstream main + the four PR
+branches). **All four merge cleanly**, including #293 and #296 which both touch
+`h8s.hpp`, and #294 and this PR which both touch `esp.hpp`.
+
+| build | vs vanilla | realtime |
+|-------|-----------|----------|
+| vanilla upstream, serial | 1.000x | 0.43x |
+| + #293 #294 #296, serial | 1.83x | 0.83x |
+| + pipeline, 2 stages | 3.82x | 1.75x |
+| + pipeline, 3 stages | ~4.5x | ~1.96-2.03x |
+
+The engine PRs compose as predicted: 1.06 x 1.65 x 1.014 = 1.77 predicted, 1.83
+measured. Nothing was double-counted.
+
+**Quote the 3-stage figure as a range.** Its two runs differed by 7.7% of bytes
+(196% vs 203% realtime), far worse than the 0.24% seen in the dedicated run.
+
+**COMPOSITE BIT-EXACTNESS HOLDS.** Three engine PRs stacked, serial output
+byte-identical to vanilla upstream over 68,297,472 bytes. That is the strongest
+correctness evidence in the whole effort -- each PR claims to change nothing, and
+stacked they still change nothing.
+
+**But pipeline vs serial on the INTEGRATED build is not byte-exact.** Identical
+except a **731 ms transient at 176.0 s**: 28,018 of 8,000,000 bytes differ
+(0.35%) at RMS ratio **0.0002 (-74 dB)**, then the streams re-converge exactly at
+the same +2 shift. Roughly 8 counts on 24-bit samples -- inaudible, but real.
+
+Both configurations are individually DETERMINISTIC here: integrated serial
+self-identical over 235 s, integrated 3-stage self-identical over **562 s**. So
+this is a reproducible difference, not the timing nondeterminism seen on the
+pipeline-only branch -- and the 223.8 s divergence did not appear at all in this
+build, which fits it being jitter-dependent.
+
+Cause not chased. Disclosed in the PR body rather than left to be found.
