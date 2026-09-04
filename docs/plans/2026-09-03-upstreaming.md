@@ -304,8 +304,29 @@ Three things reviewers will and should ask:
   sinks a plugin PR on principle. Note the delay only needs to be 2 samples for
   determinism -- our default of 64 is arbitrary and should drop to the minimum
   upstream, which makes the question nearly moot.
-- **x86 desktop is unmeasured** for the engine optimizations. Apple Silicon says
-  ~0; a desktop is architecturally closer to that than to an A72.
+- **x86 desktop is UNMEASURED, and we ship it that way.** DECIDED 2026-09-04:
+  disclose rather than measure. We have no x86 hardware; the routes to a number
+  were a shared CI runner (noisy, and `bench_je` needs the copyrighted ROMs --
+  635 KB against a 64 KB secret limit) or renting a VM, and neither buys enough
+  to delay on. Do NOT reach for Docker x86_64 on Apple Silicon: that is
+  Rosetta/QEMU translation, its timings say nothing about native x86, and it
+  would hand us a confidently wrong number of exactly the kind that has cost us
+  most.
+
+  Wording ready to paste into the PR:
+
+  > Measured on ARM: 1.85x on a Cortex-A72 (Pi 4B @ 1.8 GHz), and ~0 on Apple
+  > Silicon -- a wide out-of-order core absorbs the per-instruction timer loop,
+  > the pointer-table indirection and the extra ESP loads/stores that an A72
+  > pays for. x86 is untested; I have no x86 hardware. I would expect it nearer
+  > the Apple Silicon end than the A72 end, so treat this as an
+  > in-order/narrow-core win rather than a universal speedup. The changes are
+  > bit-exact either way, so if x86 gains nothing the result is neutral, not
+  > negative.
+
+  That framing is honest and is also the strongest available: it pre-empts the
+  reviewer's first question, and "bit-exact, so neutral at worst" is the real
+  argument for merging something whose benefit they cannot reproduce.
 - ~~Two instances in one process is untested~~ -- MEASURED: two work at 2
   stages each with pinning disabled, three do not. See above. The remaining
   issue is that `JE_PIPELINE_CORES` cannot express per-instance affinity.
