@@ -28,7 +28,7 @@ instrumentation, none of our other 24 commits. Verify with
 | H8S page bitmap | — | not started |
 | H8S wide access | — | not started; **depends on the page bitmap** |
 | a64::Assembler | — | not started |
-| ESP dirty tracking | `pr/esp-per-core-dirty` | split + built, **not yet measured** — measure with `patch_sweep`, not the demo |
+| ESP dirty tracking | `pr/esp-per-core-dirty` | **DRAFT PR #295 open** — 49.7% fewer core compiles, bit-exact — `esp-per-core-dirty.md` |
 | dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **DRAFT PR #294 open. THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
 | PerformanceControlChannel | — | not started; upstream's bug, frame as a question |
 | parallel pipeline | — | issue first, not a patch |
