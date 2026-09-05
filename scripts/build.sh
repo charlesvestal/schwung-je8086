@@ -21,6 +21,16 @@ if [ -z "$CROSS_PREFIX" ] && [ ! -f "/.dockerenv" ]; then
         echo ""
     fi
 
+    # The Remote UI's parameter table is generated from the header the plugin
+    # is built from. Done HERE, on the host, because the build image has no
+    # python3; the container step below only copies the result. CI then fails
+    # if the committed copy differs from what this tree generates.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$REPO_ROOT/src/tools/gen_remote_params.py"
+    else
+        echo "python3 not found: shipping the committed src/remote/assets/params.js"
+    fi
+
     # Run build inside container
     echo "Running build..."
     docker run --rm \
@@ -64,6 +74,13 @@ cat src/module.json > dist/jp8000/module.json
 cat src/help.json > dist/jp8000/help.json
 cat build/dsp.so > dist/jp8000/dsp.so
 chmod +x dist/jp8000/dsp.so
+
+# The Remote UI: web_ui.html beside module.json is what Schwung Manager looks
+# for, and assets/ is served under it (params.js was regenerated on the host
+# above; this side of the script has no python3).
+rm -rf dist/jp8000/assets
+cp src/remote/web_ui.html dist/jp8000/web_ui.html
+cp -R src/remote/assets dist/jp8000/assets
 
 # Asset directory placeholders (ROMs required, extra banks optional)
 mkdir -p dist/jp8000/roms dist/jp8000/banks

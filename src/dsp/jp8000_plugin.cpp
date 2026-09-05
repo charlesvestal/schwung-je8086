@@ -1044,6 +1044,74 @@ static jpbank::Preset preset_from_rom(const jeLib::Rom::Preset &p, bool is_perf)
     return out;
 }
 
+/* THE REMOTE UI READS THE PRESET LIST FROM A FILE, NOT FROM A PARAMETER.
+ *
+ * Schwung Manager's Remote UI page seeds a browser from our `state` blob and
+ * pushes single values as they change; it has no way to ask for `patch_name:N`
+ * on demand, and putting 128 names into `state` would write them into every
+ * slot autosave. What the manager DOES serve is any file under the module
+ * folder (/api/remote-ui/module-assets/jp8000/<path>), so the child writes the
+ * whole catalog once, right after the scan, and web_ui.html fetches it.
+ *
+ * Row order is the shm order -- shm->*_bank_names[i] is banks.*[i], with the
+ * "! N files ignored" row (which has no vector entry) last with no presets --
+ * so an index the page picks out of this file is the index it then writes to
+ * `patch` / `performance`. Written to a temp name and renamed, so a browser
+ * that fetches mid-write sees the old file or the new one, never half of one.
+ * Failure to write is not a failure to boot: the panel falls back to the
+ * one-name-at-a-time browser. Runs in the child, never on the SPI thread. */
+static void json_escape_into(FILE *f, const std::string &s) {
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') { fputc('\\', f); fputc(c, f); }
+        else if (c < 0x20) fprintf(f, "\\u%04x", c);
+        else fputc(c, f);
+    }
+}
+
+static void child_write_catalog(jp8000_shm_t *shm, const child_banks_t &banks) {
+    char path[512], tmp[520];
+    snprintf(path, sizeof(path), "%s/banks_index.json", shm->module_dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { vlog("[child] catalog: cannot write %s (%s)", tmp, strerror(errno)); return; }
+    auto kind = [&](const char *label, const std::vector<jpbank::Bank> &list, int count,
+                    char (*names)[JP_BANK_NAME_LEN], char (*folders)[JP_BANK_NAME_LEN]) {
+        fprintf(f, "\"%s\":[", label);
+        for (int i = 0; i < count; i++) {
+            /* The folder is not in the label (the device's list is flat) but a
+             * real library is organised by folder, so the page groups by it. */
+            fprintf(f, "%s{\"name\":\"", i ? "," : "");
+            json_escape_into(f, names[i]);
+            fprintf(f, "\",\"folder\":\"");
+            json_escape_into(f, folders[i]);
+            fprintf(f, "\",\"presets\":[");
+            if (i < (int)list.size()) {
+                const size_t n = std::min<size_t>(list[i].presets.size(), JP_MAX_PRESETS);
+                for (size_t j = 0; j < n; j++) {
+                    fputs(j ? ",\"" : "\"", f);
+                    json_escape_into(f, list[i].presets[j].name);
+                    fputc('"', f);
+                }
+            }
+            fputs("]}", f);
+        }
+        fputc(']', f);
+    };
+    fprintf(f, "{\"version\":1,\"skipped\":%d,", shm->bank_files_skipped);
+    kind("patch", banks.patch, shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_folders);
+    fputc(',', f);
+    kind("performance", banks.perf, shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_folders);
+    fputs("}\n", f);
+    const bool ok = fclose(f) == 0;
+    if (!ok || rename(tmp, path) != 0) {
+        vlog("[child] catalog: write failed (%s)", strerror(errno));
+        unlink(tmp);
+        return;
+    }
+    vlog("[child] catalog: %d patch banks, %d perf banks -> banks_index.json",
+         shm->patch_bank_count, shm->perf_bank_count);
+}
+
 static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_banks_t &banks) {
     std::vector<std::vector<jeLib::Rom::Preset>> factory;
     rom.getPresets(factory);   /* returns false even on success; check sizes */
@@ -1136,6 +1204,7 @@ static void child_build_banks(jp8000_shm_t *shm, const jeLib::Rom &rom, child_ba
     note_skipped(&shm->patch_bank_count, shm->patch_bank_names, shm->patch_bank_sizes, shm->patch_bank_folders);
     note_skipped(&shm->perf_bank_count, shm->perf_bank_names, shm->perf_bank_sizes, shm->perf_bank_folders);
     SHM_STORE_FENCE();
+    child_write_catalog(shm, banks);
 }
 
 /* Fill the current-bank name table the parent asked for. */
