@@ -163,3 +163,17 @@ exactly when that fires.
 **Iteration note:** a 120 s run reaches ~235 s of audio at 3 stages but only
 ~95 s at serial (0.83x). The serial reference needs ~260 s. Getting that wrong
 compares against a file that never reached the event.
+
+## 2026-09-05: the pipeline was never inexact — the JIT was
+
+The 176.0/223.8 s divergences of the pipeline against its own serial were the
+uninitialised-register bug (`esp-arm64-jit-entry-state.md`): stage threads
+change the JIT's caller and with it the entry garbage. Nothing in the
+handoff/ring/uc-forwarding design was wrong — traces show GRAM handoffs, uC
+writes and recompile ticks identical between serial and pipeline. On the fix,
+2/3/4-stage output is byte-identical to serial over 200 s on M1 (Pi run in
+flight). The PR's exactness claim should note it depends on the fix PR.
+
+Wav-offset note: the constant 2-sample delivery delay can be absorbed before
+recording starts (block phase), so serial-vs-pipeline wavs align at offset 2
+OR 0. Probe, don't assume.

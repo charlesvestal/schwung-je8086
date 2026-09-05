@@ -1,5 +1,22 @@
 # Handoff — upstream PR verification, 2026-09-05
 
+## RESOLVED later the same day — one root cause for both problems
+
+The upstream ARM64 JIT reads uninitialised registers at program entry (ERAM
+latch chain, DMAC inputs, accumulators — state the x64 backend persists via
+JitInputData). Output therefore depends on the CALLING CONTEXT: reproducible
+for one binary, different for any other binary layout or when a stage thread
+becomes the caller. That is the whole of problem 1 (#293's "divergence" —
+exonerated) and problem 2 (no #294↔#297 interaction exists).
+
+Fix: `pr/esp-arm64-jit-entry-state` in the submodule. After it, on the M1:
+serial == pipeline (2/3/4 stages), all PRs stacked == fixed vanilla, and
+**arm64 == the x64 backend byte-for-byte** over 200 s. Details, method and the
+Pi confirmation: `docs/plans/pr/esp-arm64-jit-entry-state.md`. Everything
+below is the state of knowledge BEFORE the root cause; its traps remain
+valid (two more were added: anchor trace windows to the first recorded sample,
+and per-thread trace files).
+
 Read `docs/plans/pr/README.md` for the status table and the per-PR notes. This
 file is the state of the VERIFICATION work and, more importantly, the ways these
 measurements have already lied.

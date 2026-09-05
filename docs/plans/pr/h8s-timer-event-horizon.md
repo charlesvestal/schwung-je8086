@@ -142,3 +142,14 @@ Correction staged at `scratchpad/pr293_correction.md`; the network was down when
 it was found. #293 to go back to draft, then fix or withdraw. The other two
 engine PRs are CLEAN over the same long comparison (#294 378.7 s, #296 204.7 s),
 and #297's own serial output is identical to vanilla over 378.8 s.
+
+## 2026-09-05: EXONERATED — the 176.0 s divergence was not this PR
+
+The upstream ARM64 JIT reads uninitialised registers, so audio output at the
+demo's 176 s patch change depends on binary layout; ANY change to the tree
+shifts it (see `esp-arm64-jit-entry-state.md`). M1: `vanilla vs #293` differs
+(that bug), `fix vs fix+#293` is IDENTICAL over 200 s. Pi confirmation run in
+flight. The staged correction comment ("NOT BIT-EXACT") should itself be
+corrected once the fix PR is up: the timer logic was never wrong. This also
+explains the M1 bisect contradicting itself and "timer events identical yet
+audio differs".
