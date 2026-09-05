@@ -2,6 +2,9 @@
 
 ## RESOLVED later the same day — one root cause for both problems
 
+**To resume: read `2026-09-05-resume-state.md` — it has the live board,
+queued follow-ups and the harness map.**
+
 The upstream ARM64 JIT reads uninitialised registers at program entry (ERAM
 latch chain, DMAC inputs, accumulators — state the x64 backend persists via
 JitInputData). Output therefore depends on the CALLING CONTEXT: reproducible
