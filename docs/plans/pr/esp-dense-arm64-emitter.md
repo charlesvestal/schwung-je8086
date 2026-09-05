@@ -200,3 +200,19 @@ leaves only a few percent to divide between PRs 4, 5, 7 and 8. Expect ESP dirty
 tracking (PR 8) to be small in a throughput harness — it removes compile stalls,
 not steady-state work — and measure it with `patch_sweep`, which actually changes
 patches, rather than with this demo.
+
+## 2026-09-05: rebased onto the entry-state fix; review comments folded in
+
+`pr/esp-dense-arm64-emitter` now sits on `pr/esp-arm64-jit-entry-state`
+(backup of the old head: `backup/pr294-pre-fix`). Amended in:
+- reviewer: `ESP_IRAM_MIRROR` now derives from `JIT_ARM64` (MSVC ARM64 got
+  256-entry buffers under a 512-entry addressing scheme);
+- reviewer: `coef << n` UB replaced with `coef * (1 << n)`;
+- ours: the `nextIsDmac` elision scan wraps to the program's first op (with
+  entry/exit persistence the last op's successor is the next call's first op);
+- ours: jitEnter/jitExit persistence merged into the dense emitter.
+M1: serial byte-identical to fixed vanilla over 200 s. NOT pushed yet;
+perf on the Pi must be re-measured before updating the PR (persistence adds
+~30 instr per call, expected noise).
+
+The "#294 ↔ #297 interaction" is retracted — it was the entry-state bug.

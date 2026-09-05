@@ -20,6 +20,14 @@ instrumentation, none of our other 24 commits. Verify with
 
 ## Status
 
+**2026-09-05: ROOT CAUSE FOUND for both open problems** (#293's 176 s
+divergence AND the "#294↔#297 interaction"): the upstream ARM64 JIT reads
+uninitialised registers — entry state depends on the CALLER, so any binary
+layout change or a worker thread changes the audio. One fix repairs both, and
+makes arm64 byte-identical to the x64 backend. See
+`esp-arm64-jit-entry-state.md`. Branches are updated LOCALLY; nothing pushed
+yet.
+
 | PR | branch | state |
 |----|--------|-------|
 | timer event horizon | `pr/h8s-timer-event-horizon` | **#293 — NOT BIT-EXACT.** Diverges at 176.0 s, -64 dB, no recovery. Correction staged; back to draft. — `h8s-timer-event-horizon.md` |
