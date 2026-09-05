@@ -111,7 +111,10 @@ emitter's jitEnter/jitExit.
   (build-native-fix): `plugin_host_test` full snapshot+fork+MIDI path → AUDIO
   OK, 3 stages, 0 underruns; and `jp8000_render` raw ASIC3 tap (JE_RAWDUMP)
   byte-identical serial vs 3-stage pipeline (x2 runs) on patch_sweep AND
-  sustained_c4. Remaining on-device: select jp8000 in a slot and listen —
-  no midi_inject_test exists on this device (that memory is stale).
+  sustained_c4. On-device verification COMPLETE 2026-09-05 ~15:12: user
+  loaded jp8000 into slot 0 — fresh dsp.so mapped (base=0x7fa9250000, host
+  younger than install), 3 fork stages at RT prio rendering, and confirmed by
+  ear (Chariots sounds like Chariots). debug_log_on removed again. Note: no
+  midi_inject_test exists on this device (that memory is stale).
 - Pushed to `charlesvestal/gearmulator`: `pr/esp-arm64-jit-entry-state`,
   `pr/esp-dense-arm64-emitter` (forced). Everything else local.
