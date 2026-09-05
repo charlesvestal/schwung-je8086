@@ -204,6 +204,18 @@ displays -- grid, glowing trace, area fill, a dashed cutoff or gate marker -- an
 the LFO 1 scope runs at the LFO's rate while its tab is showing. Preset cells
 take a muted hue from their name's tag so LD, PD and BS read apart at a glance.
 
+**A drag redraws one display, not fifteen.** Each display records, while it
+draws, every parameter it read; an edit redraws only the displays whose last
+drawing depended on that key (`redrawViz(keys)`), and a dump, a tab change or a
+resize redraws everything (`redrawViz()`). Each curve is built once into a
+`Path2D` and reused by the fill and both strokes. While a finger is on a control
+the trace's glow is a wide translucent stroke rather than `shadowBlur` -- the
+slowest primitive the 2D context has -- and the two LFO scopes stand still; they
+otherwise run at 30 fps. The knob's arc glow is a second, wider stroke, not an
+SVG filter, so a value change does not re-rasterise a filtered region. Measured
+by the maintainer on the first cut: a drag frame redrew every display with blur
+at 0.36 ms each at dpr 2, 5.4 ms per frame, before any of this.
+
 ## Looking at it without a device
 
     python3 src/tools/remote_preview.py            # -> build-preview/je8086-remote-preview.html

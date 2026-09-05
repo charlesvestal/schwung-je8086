@@ -462,7 +462,10 @@ select {
 .knob .well { fill: url(#kwell); }
 .knob .ticks line { stroke: var(--legend-3); stroke-width: 1; opacity: 0.7; }
 .knob .track { fill: none; stroke: #0f1216; stroke-width: 3.5; }
-.knob .arc { fill: none; stroke: var(--lcd); stroke-width: 3; stroke-linecap: round; filter: url(#kglow); }
+/* the glow is a wide translucent stroke under the arc, not an SVG filter: a
+   filtered region is re-rasterised on every value change, i.e. on every drag frame */
+.knob .arcglow { fill: none; stroke: var(--lcd); stroke-width: 7.5; stroke-linecap: round; opacity: 0.22; }
+.knob .arc { fill: none; stroke: var(--lcd); stroke-width: 3; stroke-linecap: round; }
 .knob .rim { fill: url(#krim); }
 .knob .cap { fill: url(#kcap); stroke: rgba(0, 0, 0, 0.6); stroke-width: 0.5; }
 .knob .ptr {

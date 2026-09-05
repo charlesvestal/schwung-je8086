@@ -507,6 +507,14 @@ answers with a hierarchy message and its page re-renders the slot, iframe
 included, i.e. the panel reloads. That was "the whole app refreshes on a preset
 change" on the first device test.
 
+**A drag redraws only the displays that read the edited key.** Every display
+records what it reads through `v()`/`vOther()` while it draws; `redrawViz(keys)`
+redraws the dependants, `redrawViz()` everything. Curves are one `Path2D` per
+display, glow is `shadowBlur` only while no finger is down, the scopes stand
+still during a drag. The first cut redrew all fifteen displays with blur on every
+drag frame (5.4 ms at dpr 2, per the maintainer's measurement); if a display
+looks stale after an edit, the key it depends on was read outside `v()`.
+
 `node tests/remote/model_test.mjs` checks the byte layout against the plugin's
 and that every parameter has exactly one cell. `python3
 src/tools/remote_preview.py` bundles the page with a mock manager into one file

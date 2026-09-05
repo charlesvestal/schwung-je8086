@@ -71,7 +71,7 @@
         setParam(key, value);
         refreshKey(key);
         lcdShow(p, value);
-        redrawViz();
+        redrawViz([key]);
     }
 
     /* ---- inbound ------------------------------------------------------------- */
@@ -188,7 +188,7 @@
             for (var k in touched) if (byKey[k]) refreshKey(k);
             if (touched.__sys || touched.buffer_ms) refreshSystem();
             if (touched.__names || presetMoved) { refreshHeader(); refreshBrowser(); }
-            if (Object.keys(touched).length) redrawViz();
+            if (Object.keys(touched).length) redrawViz(Object.keys(touched));
         }
         /* A preset, bank, mode or part moved on the device without a new dump
          * in the same message: ask the manager for a full re-read. */
@@ -653,12 +653,18 @@
 
     /* Drag/wheel/keyboard handling shared by knobs and sliders. `axis` is the
      * pixel travel for the full range. */
+    /* How many fingers are on a control right now. While it is not zero the
+     * displays draw without shadow blur and the scopes stand still: a drag
+     * frame has to be cheap, and the glow comes back on the frame after the
+     * finger lifts. */
+    var DRAG = { n: 0 };
+    function draggingNow() { return DRAG.n > 0; }
     function bindRange(node, p, get, commit, pixels) {
         var startY = 0, startV = 0, dragging = false, acc = 0;
         var span = p.max - p.min;
         node.addEventListener("pointerdown", function (e) {
             if (e.button !== 0 && e.pointerType === "mouse") return;
-            dragging = true; startY = e.clientY; startV = get(); acc = 0;
+            dragging = true; startY = e.clientY; startV = get(); acc = 0; DRAG.n++;
             node.classList.add("dragging");
             node.setPointerCapture(e.pointerId);
             node.focus({ preventScroll: true });
@@ -671,7 +677,7 @@
             var nv = Math.round(startV + dv);
             if (nv !== get()) commit(nv);
         });
-        function up(e) { if (dragging) { dragging = false; node.classList.remove("dragging"); try { node.releasePointerCapture(e.pointerId); } catch (x) {} } }
+        function up(e) { if (dragging) { dragging = false; DRAG.n = Math.max(0, DRAG.n - 1); node.classList.remove("dragging"); try { node.releasePointerCapture(e.pointerId); } catch (x) {} redrawViz([p.key]); } }
         node.addEventListener("pointerup", up);
         node.addEventListener("pointercancel", up);
         node.addEventListener("wheel", function (e) {
@@ -746,13 +752,14 @@
             '<circle class="well" cx="32" cy="32" r="30"/>' +
             '<g class="ticks">' + TICKS + '</g>' +
             '<path class="track" d="' + arcPath(32, 32, 27, -135, 135) + '"/>' +
+            '<path class="arcglow" d=""/>' +
             '<path class="arc" d=""/>' +
             '<line class="ghost" x1="0" y1="0" x2="0" y2="0" visibility="hidden"/>' +
             '<circle class="rim" cx="32" cy="32" r="22"/>' +
             '<circle class="cap" cx="32" cy="32" r="20.5"/>' +
             '<line class="ptr" x1="32" y1="30" x2="32" y2="15"/>' +
             (bipolar ? '<circle class="detent" cx="32" cy="2.5" r="1.1"/>' : "");
-        var arc = svg.querySelector(".arc"), ghost = svg.querySelector(".ghost"), ptr = svg.querySelector(".ptr");
+        var arc = svg.querySelector(".arc"), arcGlow = svg.querySelector(".arcglow"), ghost = svg.querySelector(".ghost"), ptr = svg.querySelector(".ptr");
         k.appendChild(svg);
         c.el.appendChild(k); c.el.appendChild(c.value);
         var cur = p.default;
@@ -762,8 +769,9 @@
             cur = has ? v : p.default;
             var a = angle(cur);
             ptr.style.transform = "rotate(" + a + "deg)";
-            arc.setAttribute("d", bipolar ? arcPath(32, 32, 27, angle(0), a) : arcPath(32, 32, 27, -135, a));
-            arc.style.visibility = has && (bipolar ? cur !== 0 : cur > p.min) ? "" : "hidden";
+            var ad = bipolar ? arcPath(32, 32, 27, angle(0), a) : arcPath(32, 32, 27, -135, a);
+            arc.setAttribute("d", ad); arcGlow.setAttribute("d", ad);
+            arc.style.visibility = arcGlow.style.visibility = has && (bipolar ? cur !== 0 : cur > p.min) ? "" : "hidden";
             if (g !== null && g !== undefined) {
                 var ga = angle(g), q0 = polar(32, 32, 30.5, ga), q1 = polar(32, 32, 24.5, ga);
                 ghost.setAttribute("x1", q0[0]); ghost.setAttribute("y1", q0[1]); ghost.setAttribute("x2", q1[0]); ghost.setAttribute("y2", q1[1]);
@@ -1102,11 +1110,11 @@
         var k = document.createElement("div"); k.className = "knob"; k.tabIndex = 0; k.setAttribute("role", "slider"); k.setAttribute("aria-label", "Audio buffer in milliseconds");
         k.setAttribute("aria-valuemin", p.min); k.setAttribute("aria-valuemax", p.max);
         var svg = svgEl("svg", { viewBox: "0 0 64 64" });
-        var track = svgEl("path", { class: "track", d: arcPath(32, 32, 27, -135, 135) }), arc = svgEl("path", { class: "arc" });
-        svg.appendChild(track); svg.appendChild(arc); svg.appendChild(svgEl("circle", { class: "cap", cx: 32, cy: 32, r: 21 }));
+        var track = svgEl("path", { class: "track", d: arcPath(32, 32, 27, -135, 135) }), arcGlow = svgEl("path", { class: "arcglow" }), arc = svgEl("path", { class: "arc" });
+        svg.appendChild(track); svg.appendChild(arcGlow); svg.appendChild(arc); svg.appendChild(svgEl("circle", { class: "cap", cx: 32, cy: 32, r: 21 }));
         var ptr = svgEl("line", { class: "ptr", x1: 32, y1: 32, x2: 32, y2: 14 }); svg.appendChild(ptr); k.appendChild(svg);
         var cur = p.default;
-        function set(v) { if (v === null || v === undefined || isNaN(v)) { val.textContent = "--"; return; } cur = v; var a = -135 + 270 * (v - p.min) / (p.max - p.min); ptr.style.transform = "rotate(" + a + "deg)"; arc.setAttribute("d", arcPath(32, 32, 27, -135, a)); val.textContent = v + " ms"; k.setAttribute("aria-valuenow", v); }
+        function set(v) { if (v === null || v === undefined || isNaN(v)) { val.textContent = "--"; return; } cur = v; var a = -135 + 270 * (v - p.min) / (p.max - p.min); ptr.style.transform = "rotate(" + a + "deg)"; arc.setAttribute("d", arcPath(32, 32, 27, -135, a)); arcGlow.setAttribute("d", arcPath(32, 32, 27, -135, a)); val.textContent = v + " ms"; k.setAttribute("aria-valuenow", v); }
         bindRange(k, p, function () { return cur; }, function (v) { v = Math.max(p.min, Math.min(p.max, Math.round(v))); S.buffer_ms = v; set(v); setParam("buffer_ms", v); }, 140);
         inline.appendChild(k); inline.appendChild(val); c.appendChild(l); c.appendChild(inline);
         return { el: c, set: set };
@@ -1173,13 +1181,40 @@
         vizByGroup[id] = c;
         return box;
     }
-    var vizRaf = 0;
-    function redrawViz() { if (vizRaf) return; vizRaf = requestAnimationFrame(function () { vizRaf = 0; drawAllViz(); }); }
+    /* A knob drag redraws the display(s) that READ that key, not the panel.
+     *
+     * Each display records, while it draws, every parameter it read through
+     * v() / vOther(); redrawViz(keys) then redraws only the displays whose last
+     * drawing depended on one of those keys. A display never drawn (its tab was
+     * hidden) has no record and is drawn when asked, which records it. With no
+     * argument -- a dump, a tab change, a resize -- everything is drawn. This
+     * took a drag frame from fifteen displays to one. */
+    var vizRaf = 0, vizPending = null;      // null: nothing queued; true: everything; {key:1}: those
+    var vizDeps = {}, depTrack = null;      // display id -> keys read during its last draw
+    function redrawViz(keys) {
+        if (!keys) vizPending = true;
+        else if (vizPending !== true) { vizPending = vizPending || {}; for (var i = 0; i < keys.length; i++) vizPending[keys[i]] = 1; }
+        if (vizRaf) return;
+        vizRaf = requestAnimationFrame(function () { vizRaf = 0; var q = vizPending; vizPending = null; if (q === true) drawAllViz(); else if (q) drawVizFor(q); });
+    }
+    function drawVizFor(keys) {
+        if (!S.temp) return;
+        for (var id in DRAW) {
+            var d = vizDeps[id];
+            if (!d) { drawViz(id); continue; }
+            for (var k in keys) if (d[k]) { drawViz(id); break; }
+        }
+    }
+    function drawViz(id) {
+        var c = vizByGroup[id]; if (!c || !visible(c)) return;
+        depTrack = vizDeps[id] = {};
+        try { DRAW[id](c); } finally { depTrack = null; }
+    }
     function visible(c) { return c.parentNode.offsetParent !== null && c.parentNode.clientWidth > 0; }
     function ctx2d(c) {
         var box = c.parentNode, dpr = window.devicePixelRatio || 1, w = box.clientWidth || 200, h = box.clientHeight || 56;
         if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
-        var g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+        var g = c.__g || (c.__g = c.getContext("2d")); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
         return { g: g, w: w, h: h };
     }
     var AMBER = "#f2b13d", AMBER_DIM = "rgba(242,177,61,0.45)", GRID = "rgba(242,177,61,0.09)", GRID2 = "rgba(242,177,61,0.16)";
@@ -1192,20 +1227,27 @@
         g.stroke();
         g.strokeStyle = GRID2; g.beginPath(); g.moveTo(0, Math.round(h / 2) + 0.5); g.lineTo(w, Math.round(h / 2) + 0.5); g.stroke();
     }
-    function glowStroke(g, path) {
-        g.save(); g.shadowColor = "rgba(242,177,61,0.85)"; g.shadowBlur = 7; g.strokeStyle = AMBER; g.lineWidth = 1.7; g.lineJoin = "round"; g.lineCap = "round";
-        path(); g.stroke(); g.restore();
-        g.strokeStyle = "#fff0cf"; g.lineWidth = 0.6; g.globalAlpha = 0.55; path(); g.stroke(); g.globalAlpha = 1;
+    /* Curves are built ONCE into a Path2D and reused by the fill and both
+     * strokes; the per-pixel loops used to run three times per display.
+     * shadowBlur is the slowest primitive the 2D context has, so while a finger
+     * is down the glow is a wide translucent stroke instead. */
+    function shadow(g, col, blur) { if (draggingNow()) return; g.shadowColor = col; g.shadowBlur = blur; }
+    function glowStroke(g, P) {
+        g.save(); g.lineJoin = "round"; g.lineCap = "round";
+        if (draggingNow()) { g.strokeStyle = "rgba(242,177,61,0.22)"; g.lineWidth = 5; g.stroke(P); }
+        else shadow(g, "rgba(242,177,61,0.85)", 7);
+        g.strokeStyle = AMBER; g.lineWidth = 1.7; g.stroke(P); g.restore();
+        g.strokeStyle = "#fff0cf"; g.lineWidth = 0.6; g.globalAlpha = 0.55; g.stroke(P); g.globalAlpha = 1;
     }
-    function areaFill(g, w, h, path, base) {
+    function areaFill(g, w, h, P, base) {
         var grad = g.createLinearGradient(0, 0, 0, h); grad.addColorStop(0, "rgba(242,177,61,0.28)"); grad.addColorStop(1, "rgba(242,177,61,0.02)");
-        g.beginPath(); path(); g.lineTo(w, base); g.lineTo(0, base); g.closePath(); g.fillStyle = grad; g.fill();
+        var A = new Path2D(P); A.lineTo(w, base); A.lineTo(0, base); A.closePath(); g.fillStyle = grad; g.fill(A);
     }
     function label(g, h, text) { g.fillStyle = AMBER_DIM; g.font = "600 9px " + mono(); g.fillText(text, 6, h - 5); }
-    function v(key, d) { var x = valueOf(key); return x === null || x === undefined ? d : x; }
+    function v(key, d) { if (depTrack) depTrack[key] = 1; var x = valueOf(key); return x === null || x === undefined ? d : x; }
     /* a patch parameter read for the OTHER part, when both parts sound */
     function bothPartsSound() { return v("key_mode", 0) !== 0; }
-    function vOther(key, d) { if (!S.temp) return d; var x = M.readParam(S.temp, byKey[key], otherPart()); return x === null ? d : x; }
+    function vOther(key, d) { if (depTrack) depTrack[key] = 1; if (!S.temp) return d; var x = M.readParam(S.temp, byKey[key], otherPart()); return x === null ? d : x; }
     var GHOST = "#7fb9ff", GHOST_DIM = "rgba(127,185,255,0.55)";
 
     function drawEnv(c, a, dd, s, r, text) {
@@ -1216,9 +1258,9 @@
         var tot = ta + td + hold + tr;
         var x0 = pad, x1 = x0 + ta / tot * W0, x2 = x1 + td / tot * W0, x3 = x2 + hold / tot * W0, x4 = x3 + tr / tot * W0;
         var yb = pad + H0, yt = pad + 2, ys = yb - s / 127 * (H0 - 2);
-        function path() { g.moveTo(x0, yb); g.lineTo(x1, yt); g.lineTo(x2, ys); g.lineTo(x3, ys); g.lineTo(x4, yb); }
-        areaFill(g, w, h, path, yb);
-        glowStroke(g, function () { g.beginPath(); path(); });
+        var P = new Path2D(); P.moveTo(x0, yb); P.lineTo(x1, yt); P.lineTo(x2, ys); P.lineTo(x3, ys); P.lineTo(x4, yb);
+        areaFill(g, w, h, P, yb);
+        glowStroke(g, P);
         /* the gate: where the key goes up */
         g.strokeStyle = GRID2; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(x3 + 0.5, pad); g.lineTo(x3 + 0.5, yb); g.stroke(); g.setLineDash([]);
         label(g, h, text);
@@ -1263,7 +1305,7 @@
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
         var p = byKey[n === 1 ? "osc1_waveform" : "osc2_waveform"], shape = p.options[v(p.key, 0)] || "SAW";
         var c1 = v(n === 1 ? "osc1_ctrl1" : "osc2_ctrl1", 0), c2 = v(n === 1 ? "osc1_ctrl2" : "osc2_ctrl2", 0);
-        glowStroke(g, function () { g.beginPath(); wavePath(g, w, h, shape, c1, c2, 2, 0); });
+        var P = new Path2D(); wavePath(P, w, h, shape, c1, c2, 2, 0); glowStroke(g, P);
         var txt = shape;
         if (n === 2) { var rg = v("osc2_range", 0), fn = v("osc2_fine", 0); txt += "   " + (rg > 0 ? "+" : "") + rg + " st " + (fn > 0 ? "+" : "") + fn + (v("osc2_sync", 0) ? "  SYNC" : ""); }
         label(g, h, txt);
@@ -1271,8 +1313,8 @@
     function drawLfoScope(c, shape, rate, fade, phase, text) {
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
         var cycles = 1.5 + rate * 6;
-        glowStroke(g, function () {
-            g.beginPath();
+        var P = new Path2D();
+        {
             var mid = h / 2, A = h / 2 - 8, seed = 7;
             for (var x = 0; x <= w; x++) {
                 var t = x / w * cycles + phase, ph = t - Math.floor(t), y0;
@@ -1282,38 +1324,43 @@
                 else { var k = Math.floor(t); seed = ((k * 9301 + 49297) % 233280); y0 = (seed / 233280) * 2 - 1; }
                 var ampF = fade > 0 ? Math.min(1, (x / w) / (0.15 + fade * 0.85)) : 1;
                 var y = mid - y0 * ampF * A;
-                if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
+                if (x === 0) P.moveTo(x, y); else P.lineTo(x, y);
             }
-        });
+        }
+        glowStroke(g, P);
         label(g, h, text);
     }
     var animRaf = 0, animLast = 0;
+    function drawLfo1(c) {
+        var r1 = v("lfo1_rate", 64) / 127;
+        drawLfoScope(c, v("lfo1_waveform", 0), r1, v("lfo1_fade", 0) / 127, lfoPhase, ["TRI", "SAW", "SQR", "RND"][v("lfo1_waveform", 0)] + "  " + v("lfo1_rate", 64));
+    }
+    function drawLfo2(c) {
+        var r2 = v("lfo2_rate", 64) / 127, dest = v("lfo2_depth_select", 0);
+        var depthKey = ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"][dest];
+        drawLfoScope(c, 0, r2, 0, lfo2Phase, "TRI  " + v("lfo2_rate", 64) + "  \u2192 " + ["PITCH", "FILTER", "AMP"][dest] + " " + (v(depthKey, 0) > 0 ? "+" : "") + v(depthKey, 0));
+    }
+    /* The two scopes move at 30 fps, and stand still while a finger is on a
+     * control: a drag frame is not the moment to redraw two wide displays. */
     function animateScopes(now) {
         animRaf = 0;
-        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        var dt = animLast ? (now - animLast) / 1000 : 0; animLast = now;
         if (!S.temp) return;
+        var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var dt = animLast ? (now - animLast) / 1000 : 0;
+        if (draggingNow() || (animLast && dt < 1 / 32)) { if (draggingNow()) animLast = now; animRaf = requestAnimationFrame(animateScopes); return; }
+        animLast = now;
         var any = false;
-        if (vizByGroup.lfo1 && visible(vizByGroup.lfo1)) {
-            var r1 = v("lfo1_rate", 64) / 127;
-            if (!reduce) lfoPhase += dt * (0.15 + r1 * 2.2);
-            drawLfoScope(vizByGroup.lfo1, v("lfo1_waveform", 0), r1, v("lfo1_fade", 0) / 127, lfoPhase, ["TRI", "SAW", "SQR", "RND"][v("lfo1_waveform", 0)] + "  " + v("lfo1_rate", 64)); any = true;
-        }
-        if (vizByGroup.lfo2 && visible(vizByGroup.lfo2)) {
-            var r2 = v("lfo2_rate", 64) / 127, dest = v("lfo2_depth_select", 0);
-            if (!reduce) lfo2Phase += dt * (0.15 + r2 * 2.2);
-            var depthKey = ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"][dest];
-            drawLfoScope(vizByGroup.lfo2, 0, r2, 0, lfo2Phase, "TRI  " + v("lfo2_rate", 64) + "  → " + ["PITCH", "FILTER", "AMP"][dest] + " " + (v(depthKey, 0) > 0 ? "+" : "") + v(depthKey, 0)); any = true;
-        }
+        if (vizByGroup.lfo1 && visible(vizByGroup.lfo1)) { if (!reduce) lfoPhase += dt * (0.15 + v("lfo1_rate", 64) / 127 * 2.2); drawViz("lfo1"); any = true; }
+        if (vizByGroup.lfo2 && visible(vizByGroup.lfo2)) { if (!reduce) lfo2Phase += dt * (0.15 + v("lfo2_rate", 64) / 127 * 2.2); drawViz("lfo2"); any = true; }
         if (any && !reduce && T.cur !== "presets" && T.cur !== "system") animRaf = requestAnimationFrame(animateScopes);
     }
     function drawTone(c) {
         if (!visible(c)) return;
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
         var bass = v("tone_bass", 0) / 64, treb = v("tone_treble", 0) / 64, mid = h / 2, A = h / 2 - 9;
-        function path() { for (var x = 0; x <= w; x++) { var f = x / w; var lo = 1 / (1 + Math.exp((f - 0.28) * 18)), hi = 1 / (1 + Math.exp(-(f - 0.7) * 18)); var y = mid - (bass * lo + treb * hi) * A; if (x === 0) g.moveTo(x, y); else g.lineTo(x, y); } }
-        areaFill(g, w, h, path, mid);
-        glowStroke(g, function () { g.beginPath(); path(); });
+        var P = new Path2D(); for (var x = 0; x <= w; x++) { var f = x / w; var lo = 1 / (1 + Math.exp((f - 0.28) * 18)), hi = 1 / (1 + Math.exp(-(f - 0.7) * 18)); var y = mid - (bass * lo + treb * hi) * A; if (x === 0) P.moveTo(x, y); else P.lineTo(x, y); }
+        areaFill(g, w, h, P, mid);
+        glowStroke(g, P);
         label(g, h, "BASS " + (bass > 0 ? "+" : "") + v("tone_bass", 0) + "   TREBLE " + (treb > 0 ? "+" : "") + v("tone_treble", 0));
     }
     function drawChorus(c) {
@@ -1323,7 +1370,8 @@
         var spread = 0.05 + lvl * 0.35, rateF = [1.5, 2.5, 4, 2, 1.2, 1.6, 3.5, 1, 3, 2.2, 0.8, 0.9][type] || 2;
         [-1, 0, 1].forEach(function (k, i) {
             g.globalAlpha = i === 1 ? 1 : 0.55;
-            glowStroke(g, function () { g.beginPath(); for (var x = 0; x <= w; x++) { var t = x / w; var y = mid - Math.sin(t * Math.PI * 2 * rateF + k * spread * Math.PI) * A * (0.55 + lvl * 0.45); if (x === 0) g.moveTo(x, y); else g.lineTo(x, y); } });
+            var P = new Path2D(); for (var x = 0; x <= w; x++) { var t = x / w; var y = mid - Math.sin(t * Math.PI * 2 * rateF + k * spread * Math.PI) * A * (0.55 + lvl * 0.45); if (x === 0) P.moveTo(x, y); else P.lineTo(x, y); }
+            glowStroke(g, P);
         });
         g.globalAlpha = 1;
         var ctxt = byKey.chorus_type.options[type] + "   " + v("chorus_level", 0);
@@ -1332,7 +1380,7 @@
     }
     function drawEchoes(g, w, h, type, time, fb, lvl, color, glow, xoff) {
         var mid = h / 2, x = 10 + (xoff || 0), gap = 14 + time * (w * 0.22), amp = 1, n = 0, pan = type <= 2;
-        g.save(); g.shadowColor = glow; g.shadowBlur = 6; g.fillStyle = color;
+        g.save(); shadow(g, glow, 6); g.fillStyle = color;
         if (!xoff) g.fillRect(x - 1.5, mid - (h / 2 - 9), 3, (h - 18));                  // the dry hit
         while (x + gap < w - 6 && n < 12) {
             x += gap; n++; amp *= (n === 1 ? lvl : Math.max(0.15, fb));
@@ -1383,7 +1431,7 @@
         }
         if (mode === 2 && xOf[split] !== undefined || (mode === 2 && split >= lo && split <= hi)) {
             var xs = xOf[split] !== undefined ? xOf[split] : xOf[split - 1] + kw * 0.65;
-            g.save(); g.shadowColor = "rgba(255,255,255,0.8)"; g.shadowBlur = 5; g.fillStyle = "#fff"; g.fillRect(Math.round(xs) - 1, top - 2, 2, bot - top + 4); g.restore();
+            g.save(); shadow(g, "rgba(255,255,255,0.8)", 5); g.fillStyle = "#fff"; g.fillRect(Math.round(xs) - 1, top - 2, 2, bot - top + 4); g.restore();
         }
         label(g, h, ["SINGLE", "DUAL  upper + lower", "SPLIT at " + M.noteName(split) + "  lower | upper"][mode] + "   voices " + byKey.voice_assign.options[v("voice_assign", 0)]);
     }
@@ -1399,7 +1447,7 @@
             if (mode === 0) lvl = pos; else if (mode === 1) lvl = 1 - pos; else if (mode === 2) lvl = 1 - Math.abs(pos * 2 - 1);
             else if (mode === 3) { seed = (seed * 9301 + 49297) % 233280; lvl = seed / 233280; } else lvl = 0.5;
             var y = bot - lvl * (bot - top) * Math.min(1, range / 3), x = pad + i * sw + sw / 2;
-            g.save(); g.shadowColor = "rgba(242,177,61,0.8)"; g.shadowBlur = 5; g.fillStyle = mode === 4 ? AMBER_DIM : AMBER;
+            g.save(); shadow(g, "rgba(242,177,61,0.8)", 5); g.fillStyle = mode === 4 ? AMBER_DIM : AMBER;
             g.beginPath(); g.arc(x, y, Math.min(3, sw * 0.3), 0, Math.PI * 2); g.fill(); g.restore();
             g.strokeStyle = GRID2; g.beginPath(); g.moveTo(x, y + 3); g.lineTo(x, bot); g.stroke();
         }
@@ -1414,7 +1462,7 @@
         var grad = g.createLinearGradient(xl, 0, xr, 0); grad.addColorStop(0, "rgba(127,185,255,0.35)"); grad.addColorStop(0.5, "rgba(242,177,61,0.15)"); grad.addColorStop(1, "rgba(242,177,61,0.4)");
         g.fillStyle = grad; g.fillRect(xl, mid - 10, xr - xl, 20);
         g.strokeStyle = GRID2; g.beginPath(); for (var s = -24; s <= 24; s += 12) { var x = cx + s * unit; g.moveTo(x + 0.5, mid - 14); g.lineTo(x + 0.5, mid + 14); } g.stroke();
-        g.save(); g.shadowColor = "rgba(242,177,61,0.8)"; g.shadowBlur = 5; g.fillStyle = AMBER; g.fillRect(Math.round(xr) - 1, mid - 12, 2, 24); g.fillStyle = "#7fb9ff"; g.shadowColor = "rgba(127,185,255,0.8)"; g.fillRect(Math.round(xl) - 1, mid - 12, 2, 24); g.restore();
+        g.save(); shadow(g, "rgba(242,177,61,0.8)", 5); g.fillStyle = AMBER; g.fillRect(Math.round(xr) - 1, mid - 12, 2, 24); g.fillStyle = "#7fb9ff"; shadow(g, "rgba(127,185,255,0.8)", 5); g.fillRect(Math.round(xl) - 1, mid - 12, 2, 24); g.restore();
         g.fillStyle = "#fff"; g.fillRect(cx - 0.5, mid - 6, 1, 12);
         label(g, h, "BEND " + down + " / +" + up + " st" + (v("morph_bend", 0) ? "   MORPH" : "") + "   " + (v("active_bender", 0) ? "bender" : "") + " " + (v("active_control", 0) ? "ribbon" : "") + " " + (v("active_velocity", 0) ? "velocity" : ""));
     }
@@ -1422,8 +1470,8 @@
         if (!visible(c)) return;
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
         var on = v("portamento", 0), time = v("portamento_time", 0) / 127, y1 = h - 14, y2 = 10, x1 = w * 0.3, glide = on ? 8 + time * (w * 0.55) : 2;
-        function path() { g.moveTo(6, y1); g.lineTo(x1, y1); g.bezierCurveTo(x1 + glide * 0.4, y1, x1 + glide * 0.6, y2, x1 + glide, y2); g.lineTo(w - 6, y2); }
-        glowStroke(g, function () { g.beginPath(); path(); });
+        var P = new Path2D(); P.moveTo(6, y1); P.lineTo(x1, y1); P.bezierCurveTo(x1 + glide * 0.4, y1, x1 + glide * 0.6, y2, x1 + glide, y2); P.lineTo(w - 6, y2);
+        glowStroke(g, P);
         var shift = byKey.osc_shift.options[v("osc_shift", 2)];
         label(g, h, (on ? "PORTAMENTO " + v("portamento_time", 0) : "PORTAMENTO OFF") + (v("mono", 0) ? "   MONO" : "   POLY") + (v("legato", 0) ? " LEGATO" : "") + "   OSC SHIFT " + shift);
     }
@@ -1435,7 +1483,7 @@
         var mid = h / 2, unit = (w - 24) / 48;
         [["up", v("up_transpose", 0), v("up_midi_ch", 0), "rgba(242,177,61,", mid - 12], ["lo", v("lo_transpose", 0), v("lo_midi_ch", 0), "rgba(127,185,255,", mid + 4]].forEach(function (pt) {
             var x0 = w / 2 + pt[1] * unit - 40, chName = byKey.up_midi_ch.options[pt[2]];
-            g.save(); g.shadowColor = pt[3] + "0.8)"; g.shadowBlur = 6; g.fillStyle = pt[3] + "0.85)"; g.fillRect(x0, pt[4], 80, 8); g.restore();
+            g.save(); shadow(g, pt[3] + "0.8)", 6); g.fillStyle = pt[3] + "0.85)"; g.fillRect(x0, pt[4], 80, 8); g.restore();
             g.fillStyle = pt[3] + "0.9)"; g.font = "600 9px " + mono();
             g.fillText((pt[0] === "up" ? "UPPER" : "LOWER") + "  ch " + chName + "  " + (pt[1] > 0 ? "+" : "") + pt[1] + " st", x0 + 86 > w - 60 ? x0 - 96 : x0 + 86, pt[4] + 8);
         });
@@ -1447,59 +1495,58 @@
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
         var on = v("trigger_switch", 0), dest = v("trigger_dest", 0), mid = h / 2, A = h / 2 - 10;
         g.globalAlpha = on ? 1 : 0.4;
-        glowStroke(g, function () {
-            g.beginPath();
-            for (var x = 0; x <= w; x++) { var t = x / w * 4, ph = t - Math.floor(t); var env = ph < 0.08 ? ph / 0.08 : Math.exp(-(ph - 0.08) * 6); var y = mid + A - env * A * 2 * (dest === 0 ? 0.7 : 1); if (x === 0) g.moveTo(x, y); else g.lineTo(x, y); }
-        });
+        var P = new Path2D();
+        for (var x = 0; x <= w; x++) { var t = x / w * 4, ph = t - Math.floor(t); var env = ph < 0.08 ? ph / 0.08 : Math.exp(-(ph - 0.08) * 6); var y = mid + A - env * A * 2 * (dest === 0 ? 0.7 : 1); if (x === 0) P.moveTo(x, y); else P.lineTo(x, y); }
+        glowStroke(g, P);
         g.globalAlpha = 1;
         label(g, h, (on ? "ON  " : "OFF  ") + byKey.trigger_dest.options[dest] + "   ch " + v("trigger_ch", 1) + "  " + M.valueText(byKey.trigger_note, v("trigger_note", 0)));
     }
+    function drawFilter(c) {
+        var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
+        var type = v("filter_type", 2), slope = v("cutoff_slope", 1), cut = v("cutoff", 127) / 127, res = v("resonance", 0) / 127;
+        var fc = 0.06 + cut * 0.86, order = slope ? 4 : 2, q = 0.5 + res * 6;
+        var base = h - 6;
+        function resp(f) {
+            var ratio = Math.max(f, 1e-4) / fc, mag;
+            if (type === 2) mag = 1 / Math.sqrt(1 + Math.pow(ratio, 2 * order));
+            else if (type === 0) mag = 1 / Math.sqrt(1 + Math.pow(1 / ratio, 2 * order));
+            else mag = 1 / Math.sqrt(1 + Math.pow((ratio - 1 / ratio) * 2, 2));
+            var peak = 1 + (q - 0.5) * Math.exp(-Math.pow((f - fc) / (0.06 + 0.02 * (1 - res)), 2));
+            return base - Math.min(1.7, mag * peak) * (h - 14) * 0.58;
+        }
+        var P = new Path2D(); for (var i = 0; i <= w; i++) { var y = resp(i / w); if (i === 0) P.moveTo(0, y); else P.lineTo(i, y); }
+        areaFill(g, w, h, P, base);
+        /* the cutoff marker */
+        var xc = fc * w;
+        g.strokeStyle = GRID2; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(Math.round(xc) + 0.5, 4); g.lineTo(Math.round(xc) + 0.5, base); g.stroke(); g.setLineDash([]);
+        glowStroke(g, P);
+        label(g, h, ["HPF", "BPF", "LPF"][type] + " " + (slope ? "-24" : "-12") + " dB   " + v("cutoff", 127) + " / " + v("resonance", 0));
+    }
+    function drawPenv(c) {
+        var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
+        var dep = v("pitch_env_depth", 0) / 64, pa = v("pitch_env_attack", 0) / 127, pd = v("pitch_env_decay", 64) / 127;
+        var mid = h / 2, xa = 8 + pa * (w * 0.35), xd = xa + 8 + pd * (w * 0.5), yp = mid - dep * (mid - 8);
+        var P = new Path2D(); P.moveTo(6, mid); P.lineTo(xa, yp); P.lineTo(Math.min(w - 6, xd), mid); P.lineTo(w - 6, mid);
+        if (dep !== 0) { var A = new Path2D(P); A.lineTo(6, mid); A.closePath(); g.fillStyle = "rgba(242,177,61,0.14)"; g.fill(A); }
+        glowStroke(g, P);
+        label(g, h, "PITCH ENV  " + (dep > 0 ? "+" : "") + v("pitch_env_depth", 0));
+    }
+    /* Every display, by the id mkViz registered it under. drawViz(id) draws one
+     * and records what it read; drawAllViz draws them all. */
+    var DRAW = {
+        fenv: function (c) { drawEnv(c, v("filter_attack", 0), v("filter_decay", 64), v("filter_sustain", 127), v("filter_release", 64), "FILTER ENV"); },
+        aenv: function (c) { drawEnv(c, v("amp_attack", 0), v("amp_decay", 0), v("amp_sustain", 127), v("amp_release", 40), "AMP ENV"); },
+        filter: drawFilter,
+        osc1: function (c) { drawOsc(c, 1); },
+        osc2: function (c) { drawOsc(c, 2); },
+        lfo1: drawLfo1, lfo2: drawLfo2,
+        tone: drawTone, chorus: drawChorus, delay: drawDelay, keys: drawKeys, arp: drawArp, bend: drawBend,
+        porta: drawPorta, parts: drawParts, trig: drawTrig, penv: drawPenv,
+    };
     function drawAllViz() {
         if (!S.temp) return;
-        if (vizByGroup.fenv) drawEnv(vizByGroup.fenv, v("filter_attack", 0), v("filter_decay", 64), v("filter_sustain", 127), v("filter_release", 64), "FILTER ENV");
-        if (vizByGroup.aenv) drawEnv(vizByGroup.aenv, v("amp_attack", 0), v("amp_decay", 0), v("amp_sustain", 127), v("amp_release", 40), "AMP ENV");
-        if (vizByGroup.filter && visible(vizByGroup.filter)) {
-            var c = vizByGroup.filter, o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
-            var type = v("filter_type", 2), slope = v("cutoff_slope", 1), cut = v("cutoff", 127) / 127, res = v("resonance", 0) / 127;
-            var fc = 0.06 + cut * 0.86, order = slope ? 4 : 2, q = 0.5 + res * 6;
-            var base = h - 6;
-            function resp(f) {
-                var ratio = Math.max(f, 1e-4) / fc, mag;
-                if (type === 2) mag = 1 / Math.sqrt(1 + Math.pow(ratio, 2 * order));
-                else if (type === 0) mag = 1 / Math.sqrt(1 + Math.pow(1 / ratio, 2 * order));
-                else mag = 1 / Math.sqrt(1 + Math.pow((ratio - 1 / ratio) * 2, 2));
-                var peak = 1 + (q - 0.5) * Math.exp(-Math.pow((f - fc) / (0.06 + 0.02 * (1 - res)), 2));
-                return base - Math.min(1.7, mag * peak) * (h - 14) * 0.58;
-            }
-            function path() { for (var i = 0; i <= w; i++) { var y = resp(i / w); if (i === 0) g.moveTo(0, y); else g.lineTo(i, y); } }
-            areaFill(g, w, h, path, base);
-            /* the cutoff marker */
-            var xc = fc * w;
-            g.strokeStyle = GRID2; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(Math.round(xc) + 0.5, 4); g.lineTo(Math.round(xc) + 0.5, base); g.stroke(); g.setLineDash([]);
-            glowStroke(g, function () { g.beginPath(); path(); });
-            label(g, h, ["HPF", "BPF", "LPF"][type] + " " + (slope ? "-24" : "-12") + " dB   " + v("cutoff", 127) + " / " + v("resonance", 0));
-        }
-        if (vizByGroup.osc1) drawOsc(vizByGroup.osc1, 1);
-        if (vizByGroup.osc2) drawOsc(vizByGroup.osc2, 2);
-        if (vizByGroup.tone) drawTone(vizByGroup.tone);
-        if (vizByGroup.chorus) drawChorus(vizByGroup.chorus);
-        if (vizByGroup.delay) drawDelay(vizByGroup.delay);
-        if (vizByGroup.keys) drawKeys(vizByGroup.keys);
-        if (vizByGroup.arp) drawArp(vizByGroup.arp);
-        if (vizByGroup.bend) drawBend(vizByGroup.bend);
-        if (vizByGroup.porta) drawPorta(vizByGroup.porta);
-        if (vizByGroup.parts) drawParts(vizByGroup.parts);
-        if (vizByGroup.trig) drawTrig(vizByGroup.trig);
+        for (var id in DRAW) drawViz(id);
         if (!animRaf) { animLast = 0; animateScopes(performance.now()); }
-        if (vizByGroup.penv && visible(vizByGroup.penv)) {
-            var c2 = vizByGroup.penv, o2 = ctx2d(c2), g2 = o2.g, w2 = o2.w, h2 = o2.h; grid(g2, w2, h2);
-            var dep = v("pitch_env_depth", 0) / 64, pa = v("pitch_env_attack", 0) / 127, pd = v("pitch_env_decay", 64) / 127;
-            var mid = h2 / 2, xa = 8 + pa * (w2 * 0.35), xd = xa + 8 + pd * (w2 * 0.5), yp = mid - dep * (mid - 8);
-            function path2() { g2.moveTo(6, mid); g2.lineTo(xa, yp); g2.lineTo(Math.min(w2 - 6, xd), mid); g2.lineTo(w2 - 6, mid); }
-            if (dep !== 0) { g2.beginPath(); path2(); g2.lineTo(6, mid); g2.closePath(); g2.fillStyle = "rgba(242,177,61,0.14)"; g2.fill(); }
-            glowStroke(g2, function () { g2.beginPath(); path2(); });
-            label(g2, h2, "PITCH ENV  " + (dep > 0 ? "+" : "") + v("pitch_env_depth", 0));
-        }
     }
 
     /* ---- go ------------------------------------------------------------------------ */
