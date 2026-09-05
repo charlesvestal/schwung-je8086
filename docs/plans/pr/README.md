@@ -25,8 +25,7 @@ divergence AND the "#294↔#297 interaction"): the upstream ARM64 JIT reads
 uninitialised registers — entry state depends on the CALLER, so any binary
 layout change or a worker thread changes the audio. One fix repairs both, and
 makes arm64 byte-identical to the x64 backend. See
-`esp-arm64-jit-entry-state.md`. Branches are updated LOCALLY; nothing pushed
-yet.
+`esp-arm64-jit-entry-state.md`. Fix PR is **#300**; #294 force-pushed onto it; #293 retraction and #297 resolution posted 2026-09-05.
 
 | PR | branch | state |
 |----|--------|-------|
