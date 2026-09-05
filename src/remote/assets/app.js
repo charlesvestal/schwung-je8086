@@ -1203,6 +1203,10 @@
     }
     function label(g, h, text) { g.fillStyle = AMBER_DIM; g.font = "600 9px " + mono(); g.fillText(text, 6, h - 5); }
     function v(key, d) { var x = valueOf(key); return x === null || x === undefined ? d : x; }
+    /* a patch parameter read for the OTHER part, when both parts sound */
+    function bothPartsSound() { return v("key_mode", 0) !== 0; }
+    function vOther(key, d) { if (!S.temp) return d; var x = M.readParam(S.temp, byKey[key], otherPart()); return x === null ? d : x; }
+    var GHOST = "#7fb9ff", GHOST_DIM = "rgba(127,185,255,0.55)";
 
     function drawEnv(c, a, dd, s, r, text) {
         if (!visible(c)) return;
@@ -1322,15 +1326,14 @@
             glowStroke(g, function () { g.beginPath(); for (var x = 0; x <= w; x++) { var t = x / w; var y = mid - Math.sin(t * Math.PI * 2 * rateF + k * spread * Math.PI) * A * (0.55 + lvl * 0.45); if (x === 0) g.moveTo(x, y); else g.lineTo(x, y); } });
         });
         g.globalAlpha = 1;
-        label(g, h, byKey.chorus_type.options[type] + "   " + v("chorus_level", 0));
+        var ctxt = byKey.chorus_type.options[type] + "   " + v("chorus_level", 0);
+        if (bothPartsSound()) ctxt += "     " + (otherPart() ? "LOWER" : "UPPER") + " part: " + byKey.chorus_type.options[vOther("chorus_type", 0)] + " " + vOther("chorus_level", 0);
+        label(g, h, ctxt);
     }
-    function drawDelay(c) {
-        if (!visible(c)) return;
-        var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
-        var type = v("delay_type", 0), time = v("delay_time", 64) / 127, fb = v("delay_feedback", 0) / 127, lvl = v("delay_level", 0) / 127;
-        var mid = h / 2, x = 10, gap = 14 + time * (w * 0.22), amp = 1, n = 0, pan = type <= 2;
-        g.save(); g.shadowColor = "rgba(242,177,61,0.8)"; g.shadowBlur = 6;
-        g.fillStyle = AMBER; g.fillRect(x - 1.5, mid - (h / 2 - 9), 3, (h - 18));       // the dry hit
+    function drawEchoes(g, w, h, type, time, fb, lvl, color, glow, xoff) {
+        var mid = h / 2, x = 10 + (xoff || 0), gap = 14 + time * (w * 0.22), amp = 1, n = 0, pan = type <= 2;
+        g.save(); g.shadowColor = glow; g.shadowBlur = 6; g.fillStyle = color;
+        if (!xoff) g.fillRect(x - 1.5, mid - (h / 2 - 9), 3, (h - 18));                  // the dry hit
         while (x + gap < w - 6 && n < 12) {
             x += gap; n++; amp *= (n === 1 ? lvl : Math.max(0.15, fb));
             if (amp < 0.03) break;
@@ -1340,7 +1343,21 @@
             else if (side > 0) g.fillRect(x - 1.5, mid - hh, 3, hh); else g.fillRect(x - 1.5, mid, 3, hh);
         }
         g.restore(); g.globalAlpha = 1;
-        label(g, h, byKey.delay_type.options[type] + "   " + v("delay_time", 64) + " / " + v("delay_feedback", 0) + " / " + v("delay_level", 0));
+    }
+    /* Both parts have their own delay and chorus, and in Dual or Split both
+     * sound. The panel edits one part at a time, so the OTHER part's echoes are
+     * drawn too, in the ghost colour -- an echo you hear with the level at 0 is
+     * almost always the other part's, and this is where it shows. */
+    function drawDelay(c) {
+        if (!visible(c)) return;
+        var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
+        var other = bothPartsSound();
+        if (other && vOther("delay_level", 0) > 0)
+            drawEchoes(g, w, h, vOther("delay_type", 0), vOther("delay_time", 64) / 127, vOther("delay_feedback", 0) / 127, vOther("delay_level", 0) / 127, GHOST, "rgba(127,185,255,0.8)", 3);
+        drawEchoes(g, w, h, v("delay_type", 0), v("delay_time", 64) / 127, v("delay_feedback", 0) / 127, v("delay_level", 0) / 127, AMBER, "rgba(242,177,61,0.8)", 0);
+        var txt = byKey.delay_type.options[v("delay_type", 0)] + "   " + v("delay_time", 64) + " / " + v("delay_feedback", 0) + " / " + v("delay_level", 0);
+        if (other) txt += "     " + (otherPart() ? "LOWER" : "UPPER") + " part: level " + vOther("delay_level", 0);
+        label(g, h, txt);
     }
     function drawKeys(c) {
         if (!visible(c)) return;
