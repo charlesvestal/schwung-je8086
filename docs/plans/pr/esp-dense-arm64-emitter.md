@@ -211,8 +211,10 @@ patches, rather than with this demo.
 - ours: the `nextIsDmac` elision scan wraps to the program's first op (with
   entry/exit persistence the last op's successor is the next call's first op);
 - ours: jitEnter/jitExit persistence merged into the dense emitter.
-M1: serial byte-identical to fixed vanilla over 200 s. NOT pushed yet;
-perf on the Pi must be re-measured before updating the PR (persistence adds
-~30 instr per call, expected noise).
+M1: serial byte-identical to fixed vanilla over 200 s. NOT pushed yet.
+Perf re-measured on the Pi with the persistence in: all-PRs serial B,A,A,B =
+42%/80%/80%/43% of realtime — the stack still delivers ~1.9x over upstream
+serial, unchanged from before the fix. (That is the STACK figure; if #294's
+own +65% number is re-quoted in the PR, re-measure #294 alone.)
 
 The "#294 ↔ #297 interaction" is retracted — it was the entry-state bug.

@@ -51,7 +51,11 @@ files (a shared filename produced a bogus "everything differs").
 `jitEnter` loads the persistent state from the `JitInputData` pointers,
 `jitExit` stores it back — exactly the x64 backend's contract. Registers with
 no backing state (condition, temps) are zeroed so entry state is
-deterministic. Cost: ~30 instructions per call, once per 384 emulated steps.
+deterministic. Cost: ~30 instructions per call, once per 384 emulated steps — measured
+unmeasurable: B,A,A,B on the Pi (2026-09-05, 300 s wall each, temps 48–50 C,
+load < 0.3) reads upstream serial 42%/43% and the all-PRs-fixed serial
+80%/80% of realtime. 0.80x is exactly the pre-fix steady-state figure for the
+optimization stack, so the persistence costs nothing visible at this scale.
 
 ## Validation so far (M1, clang, 200 s = past the 176 s trigger)
 
