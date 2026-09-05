@@ -89,3 +89,56 @@ Pre-empt two questions: the skip conditions in `update()` and in the `nextEvent`
 recompute must stay in lockstep, and `write()` resets `nextEvent`.
 
 Disclose: measured on A72 only; x86 untested (see the companion doc's wording).
+
+## RETRACTED 2026-09-05: this is NOT bit-exact
+
+**The output diverges from vanilla at 176.0 s.** The original check covered
+68,135,424 bytes = 128.7 s and stopped 47 s short of the first difference. The
+measurement was not wrong; its SCOPE was.
+
+Measured serial, idle Pi, against a vanilla `main` build, both runs long enough:
+
+```
+vanilla vs this branch:  DIFFERS at 93,135,918 = 176.0 s
+  span      739 ms
+  magnitude 1.19% of bytes, RMS ratio 0.00066  (about -64 dB)
+  recovery  NONE, still differing at 245 s
+```
+
+Two vanilla runs are byte-identical over 378.8 s, so it is the change, not noise.
+It begins exactly at the demo's patch change to `[5:Feedbacker]`.
+
+**How it was found, and the lesson.** It surfaced while chasing what looked like a
+pipeline-vs-serial transient in the all-PRs integration build. Four hypotheses
+about the PIPELINE were eliminated first (delivery delay, control-write apply
+time, handoff width, ring overflow) before checking the reference itself -- at
+which point vanilla-vs-integration SERIAL showed the same divergence byte. The
+pipeline was never involved.
+
+**Check the reference before instrumenting the suspect.** Every bisect run that
+evening compared against a serial file that already contained the defect.
+
+**And: a bit-exactness window is only as good as the shortest run in it.** The
+composite check that night covered 129 s for the same reason -- the vanilla
+reference file ended there, because vanilla is the slowest build. A fast build
+paired with a slow reference silently truncates the comparison.
+
+## What is ruled out so far
+
+- The floor-difference arithmetic IS additive across splits, as the commit claims.
+- The skip conditions in `update()` and the `nextEvent` recompute ARE in lockstep.
+- `write()` does reset `nextEvent`.
+- Externally clocked channels are excluded from both loops.
+- `inc` cannot overflow `tcnt` on the `d >= inc` fast path.
+
+Open lead: upstream raises timer IRQs only from `tick()` after `step()`;
+`catchUp()` can raise one MID-INSTRUCTION from inside a register read.
+`pending_irqs` is sampled at instruction start, so it ought to be equivalent --
+which is exactly the kind of reasoning that produced the retracted claim.
+
+## Status
+
+Correction staged at `scratchpad/pr293_correction.md`; the network was down when
+it was found. #293 to go back to draft, then fix or withdraw. The other two
+engine PRs are CLEAN over the same long comparison (#294 378.7 s, #296 204.7 s),
+and #297's own serial output is identical to vanilla over 378.8 s.
