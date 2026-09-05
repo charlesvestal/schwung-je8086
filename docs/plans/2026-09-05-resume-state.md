@@ -99,6 +99,12 @@ emitter's jitEnter/jitExit.
 - Verify branches: `verify/allfixed`, `verify/fix293`, `verify/fix297`,
   `verify/no293`, `verify/no294` — scratch, rebuildable, some predate the
   amended fix SHA.
-- Parent repo submodule POINTER deliberately untouched.
+- Parent repo submodule pointer BUMPED to `58f45e0e` (rebase-onto-upstream +
+  the #300 port: persistence, wrap-aware scan, UB fix; ESP_IRAM_MIRROR left
+  as production's unconditional 1). Verified on M1 before the bump: serial
+  deterministic, serial == 3-stage over 200 s, pre-fix vs fixed differs only
+  in the 176 s window. Old head: `backup/rebase-onto-upstream-pre-fix`
+  (9843dd92). NOT yet deployed to a Move — plugin rebuild + device A/B is the
+  next step there.
 - Pushed to `charlesvestal/gearmulator`: `pr/esp-arm64-jit-entry-state`,
   `pr/esp-dense-arm64-emitter` (forced). Everything else local.
