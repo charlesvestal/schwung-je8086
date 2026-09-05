@@ -99,13 +99,19 @@
      * image's name matches the row we asked for, keep re-reading on a widening
      * schedule; give up quietly after the last step (a preset with a blank name
      * can never match, and it should not re-read forever). */
-    var LOAD_RETRY_MS = [600, 1200, 2200, 4000];
+    /* ...and NOT by name alone. Measured on the device: a performance's NAME
+     * (the first bytes of the common block) lands in the image ~300 ms after the
+     * selection, the two patches, the arpeggiator and the effects up to ~700 ms
+     * after that. A page that stopped at the matching name kept the previous
+     * sound's arp and FX on screen -- the first device bug report. So a load is
+     * confirmed when the name matches AND two consecutive dumps are identical. */
+    var LOAD_RETRY_MS = [600, 1200, 2000, 3200, 5000];
     function expectLoad(perf, name) {
         B.loadPending = true;
-        B.expect = { perf: perf, name: (name || "").trim().toUpperCase(), step: 0 };
+        B.expect = { perf: perf, name: (name || "").trim().toUpperCase(), step: 0, lastHex: null, stable: 0 };
         scheduleResync(LOAD_RETRY_MS[0]);
     }
-    function loadConfirmed() {
+    function nameMatches() {
         var e = B.expect;
         if (!e || !S.temp) return true;
         if (!e.name) return true;                              // nothing to compare against
@@ -113,9 +119,11 @@
         return sounding === e.name;
     }
     function afterDump() {
-        if (!B.loadPending) return;
-        if (loadConfirmed()) { B.loadPending = false; B.expect = null; return; }
-        var e = B.expect;
+        if (!B.loadPending || !B.expect) return;
+        var e = B.expect, hex = S.temp ? M.bytesToHex(S.temp) : "";
+        e.stable = hex === e.lastHex ? e.stable + 1 : 0;
+        e.lastHex = hex;
+        if (nameMatches() && e.stable >= 1) { B.loadPending = false; B.expect = null; return; }
         e.step++;
         if (e.step < LOAD_RETRY_MS.length) scheduleResync(LOAD_RETRY_MS[e.step]);
         else { B.loadPending = false; B.expect = null; }       // stop asking; the header's "sounding:" says what is
@@ -184,8 +192,11 @@
         }
         /* A preset, bank, mode or part moved on the device without a new dump
          * in the same message: ask the manager for a full re-read. */
-        if (presetMoved && !gotTemp) { refreshModes(); scheduleResync(); }
-        if (presetMoved && gotTemp) refreshModes();
+        if (presetMoved) {
+            refreshModes();
+            var perfNow = S.mode === 1;
+            expectLoad(perfNow, expectedName(perfNow, perfNow ? S.perf_bank : S.bank, perfNow ? S.performance : S.patch));
+        }
     }
 
     function parseMode(v) {

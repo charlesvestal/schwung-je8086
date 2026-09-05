@@ -107,11 +107,16 @@ appear only when uppercase 2-3 letter prefixes occur three times or more AND
 cover a sixth of the presets; codes like `A23` are used only in banks of more
 than eight; the catalog carries each bank's `folder` and the banks pane groups
 by it; and an **All banks** entry lists everything, with single-preset files
-grouped under their folder. **A load is confirmed by NAME.** The manager
-re-reads state 250 ms after a write, before the firmware has clocked in a
-performance, so the first dump after a selection can still be the old sound;
-the page keeps re-reading on a widening schedule (0.6, 1.2, 2.2, 4 s) until the
-temp image's name matches the row, then stops. **The grid updates in place**:
+grouped under their folder. **A load is confirmed by a STABLE image, not by name.** The manager re-reads
+state 250 ms after a write, before the firmware has clocked in a performance, so
+the first dump after a selection can still be the old sound. Measured on the
+device with `tools`-style socket probes: the performance NAME lands ~300 ms
+after the selection, the two patches, arpeggiator and effects up to ~700 ms
+later. A page that stopped at the matching name kept the previous sound's arp
+and FX on screen -- the first device bug report. So the page keeps nudging on a
+widening schedule (0.6, 1.2, 2, 3.2, 5 s) until the name matches AND two
+consecutive dumps are byte-identical, then stops. The same confirmation runs
+for a preset changed on the Move, with the expected name taken from the catalog. **The grid updates in place**:
 rebuilding it on every dump was a visible flicker on each preset switch.
 
 **The preset list comes from a file.** The bridge cannot ask for
