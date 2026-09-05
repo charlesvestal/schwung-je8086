@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>JE-8086</title>
+<!--
+  Custom Remote UI for the JE-8086 module. Schwung Manager finds this file
+  beside module.json and loads it in a sandboxed iframe on its Remote UI page;
+  assets/ resolves under /api/remote-ui/module-assets/jp8000/. Everything the
+  page needs ships in this folder except the manager's own bridge script and
+  fonts, which are same-origin and work with no internet.
+  See docs/REMOTE_UI.md.
+-->
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<main id="app" aria-label="JE-8086 panel"></main>
+<script src="/static/schwung-remote-api.js"></script>
+<script src="assets/params.js"></script>
+<script src="assets/jp-model.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

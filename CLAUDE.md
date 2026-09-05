@@ -480,6 +480,46 @@ nothing paginated, nothing wrapped, two-option settings drawn as switches. A
 per-level layout pin is a host feature and is still not built; nothing here needs
 it.
 
+## The Remote UI
+
+`src/remote/web_ui.html` + `assets/` is the module's browser panel, shown by
+Schwung Manager in a sandboxed iframe on its Remote UI page in place of the
+generated knob view. Full contract and design notes in `docs/REMOTE_UI.md`. The
+three facts that bite:
+
+**The manager seeds the browser from `state`, flattened, and then does NOT read
+`chain_params`.** So a client gets `synth:temp` (1056 hex chars) and never
+`synth:cutoff`. The page decodes every value out of the temp image with the
+same address table the plugin compiled in -- `gen_remote_params.py` generates
+`assets/params.js` from `jp8000_params.h` (the HEADER, not gearmulator's JSON),
+`build.sh` regenerates it, and CI fails on a stale committed copy.
+
+**The bridge cannot fetch `patch_name:N`**; `getParam` answers from the parent's
+cache. The child writes `banks_index.json` into the module dir after the scan
+(`child_write_catalog`, temp-and-rename) and the page fetches it through the
+manager's module-assets route. Row order is the shm order.
+
+**A preset moved on the device arrives as an index with no `temp` beside it**
+(the manager only re-pushes whole state for a key literally named `preset`), so
+the page writes `temp_refresh=1` -- a write makes the manager re-read the slot
+250 ms later. **Never `schwungRemote.resubscribe()` from the page:** the manager
+answers with a hierarchy message and its page re-renders the slot, iframe
+included, i.e. the panel reloads. That was "the whole app refreshes on a preset
+change" on the first device test.
+
+**A drag redraws only the displays that read the edited key.** Every display
+records what it reads through `v()`/`vOther()` while it draws; `redrawViz(keys)`
+redraws the dependants, `redrawViz()` everything. Curves are one `Path2D` per
+display, glow is `shadowBlur` only while no finger is down, the scopes stand
+still during a drag. The first cut redrew all fifteen displays with blur on every
+drag frame (5.4 ms at dpr 2, per the maintainer's measurement); if a display
+looks stale after an edit, the key it depends on was read outside `v()`.
+
+`node tests/remote/model_test.mjs` checks the byte layout against the plugin's
+and that every parameter has exactly one cell. `python3
+src/tools/remote_preview.py` bundles the page with a mock manager into one file
+for looking at it without a device; its presets are examples, not factory data.
+
 ## Verifying a change is behaviour-preserving
 
 `tools/ab/bitexact.sh <ref_build> <new_build> <rom_dir> tests/scripts` renders
