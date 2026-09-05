@@ -32,8 +32,8 @@ makes arm64 byte-identical to the x64 backend. See
 | timer event horizon | `pr/h8s-timer-event-horizon` | **#293 — NOT BIT-EXACT.** Diverges at 176.0 s, -64 dB, no recovery. Correction staged; back to draft. — `h8s-timer-event-horizon.md` |
 | denormal FTZ | — | **dropped**, no measurable benefit — `denormal-ftz-dropped.md` |
 | MIDI printf | — | not started; reframed as hygiene, not performance |
-| H8S page bitmap | `pr/h8s-wide-access` | **combined into DRAFT #296** — alone it is +0.01%, i.e. nothing |
-| H8S wide access | `pr/h8s-wide-access` | **DRAFT PR #296 open** — +1.38% with the bitmap, bit-exact — `h8s-page-bitmap-and-wide-access.md` |
+| H8S page bitmap | `pr/h8s-wide-access` | **combined into #296** — alone it is +0.01%, i.e. nothing |
+| H8S wide access | `pr/h8s-wide-access` | **#296 READY FOR REVIEW** (undrafted 2026-09-05; independent of #300) — +1.38% with the bitmap, bit-exact — `h8s-page-bitmap-and-wide-access.md` |
 | a64::Assembler | — | not started |
 | ESP dirty tracking | `pr/esp-per-core-dirty` | **#295 WITHDRAWN** — real but no user-visible benefit; revisit folded together with PR 7 — `esp-per-core-dirty.md` |
 | dense ARM64 emitter | `pr/esp-dense-arm64-emitter` | **DRAFT PR #294 open. THE FLAGSHIP: +65% A72 / +45% M1, bit-exact 378.7 s** — `esp-dense-arm64-emitter.md` |
