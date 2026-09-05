@@ -33,6 +33,14 @@ jobs:
         run: |
           test -f dist/jp8000-module.tar.gz
           file dist/jp8000/dsp.so | tee /dev/stderr | grep -q 'ARM aarch64'
+          # The Remote UI must ship, and its parameter table must be the one
+          # generated from THIS tree's header, not a stale checked-in copy.
+          test -f dist/jp8000/web_ui.html
+          test -f dist/jp8000/assets/app.js
+          # build.sh regenerated params.js in the tree; a diff means the
+          # committed copy was stale.
+          git diff --exit-code -- src/remote/assets/params.js
+          node tests/remote/model_test.mjs
 
       - uses: actions/upload-artifact@v4
         with:
