@@ -22,7 +22,7 @@ instrumentation, none of our other 24 commits. Verify with
 
 | PR | branch | state |
 |----|--------|-------|
-| timer event horizon | `pr/h8s-timer-event-horizon` | **DRAFT PR #293 open** (+6%) — `h8s-timer-event-horizon.md` |
+| timer event horizon | `pr/h8s-timer-event-horizon` | **#293 — NOT BIT-EXACT.** Diverges at 176.0 s, -64 dB, no recovery. Correction staged; back to draft. — `h8s-timer-event-horizon.md` |
 | denormal FTZ | — | **dropped**, no measurable benefit — `denormal-ftz-dropped.md` |
 | MIDI printf | — | not started; reframed as hygiene, not performance |
 | H8S page bitmap | `pr/h8s-wide-access` | **combined into DRAFT #296** — alone it is +0.01%, i.e. nothing |
