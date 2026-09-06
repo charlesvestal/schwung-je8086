@@ -200,10 +200,26 @@ would be a ~7x regression for nothing. Three other things do transfer:
   voices it was bit-identical audio down to 40% clock; half clock still held six
   voices untouched. Nothing about that argument depends on the platform.
 - **PGO**, as below: 32.5% of Move's JP-8000 time is in compiled binary code.
-- **New module candidates.** On the JIT path -- which is what Move uses -- the
-  microQ and the Microwave XT both measure CHEAPER than the Virus that is
-  already shipped there (M1, four voices: microQ 9.1x, XT 9.6x, Virus 6.2x). If
-  that ratio survives on a CM4 they are easier ports, not harder ones.
+- **New module candidates, and this now has A72 evidence.** On the JIT path --
+  which is what Move uses -- the microQ and the Microwave XT both measure
+  CHEAPER than the Virus already shipped there. Pi 4B @ 1.8 GHz, 62 C, full
+  clock, best-of-3, every row AUDIO:
+
+  | synth | DSPs | clock | JIT 1v | JIT 4v | JIT 8v |
+  |---|---|---|---|---|---|
+  | Virus C | 1 | 136 MHz | 1.45x | **1.38x** | 1.17x |
+  | microQ | 1 | 118.5 MHz | 2.32x | **1.88x** | 1.49x |
+  | MW II/XT | 3 | 81.9 MHz | 1.82x | **1.80x** | 1.80x |
+
+  Scaled to Move's 1.5 GHz CM4: Virus ~1.15x, microQ ~1.57x, XT ~1.50x. That
+  says the Virus is TIGHT on Move, which matches how it behaves, and that both
+  Waldorfs would have materially more headroom.
+
+  The XT is flat across 1/4/8 voices -- its cost is three DSPs' fixed cycle
+  budget and barely moves with polyphony, which is a nicer profile for a live
+  instrument than the Virus degrading as you play more notes. Check how many
+  cores it actually occupies before believing it is free: 1.80x on a 4-core Pi
+  may be spending more than one of them.
 
 Not transferable: the interpreter, and the Apple scheduling work. Linux SCHED_FIFO behaves nothing
 like QoS/DVFS, and CLAUDE.md already covers that ground.
