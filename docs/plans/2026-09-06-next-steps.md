@@ -138,6 +138,29 @@ and Waldorf Micro Q (`microQ223.BIN`). Two snags worth recording:
 Measured core clocks, which is the thing that could not be predicted from the
 tree: **Virus C 136 MHz, microQ 118.5 MHz, MW II/XT 81.9 MHz** (times three
 DSPs -- voice expansion is on by default).
+
+**All three, M1, best-of-4, every row verified AUDIO:**
+
+| synth | DSPs | clock | JIT 4v | interp 1v | interp 4v | interp 8v |
+|---|---|---|---|---|---|---|
+| Virus C | 1 | 136 MHz | 6.23x | 0.92x | **0.81x** | 0.69x |
+| microQ | 1 | 118.5 MHz | 9.14x | 0.63x | **0.40x** | 0.37x |
+| MW II/XT | 3 | 81.9 MHz | 9.62x | 0.25x | **0.64x** | 0.37x |
+
+**The Virus is the best interpreted candidate, not the worst**, which inverts
+the ordering the JIT column gives -- microQ and XT are the CHEAPER two under the
+JIT and the more expensive two interpreted. Cost is not simply proportional to
+emulated MHz (the microQ clocks lower than the Virus and interprets at half its
+speed), so a synth's iOS viability cannot be predicted from its clock either;
+it has to be measured per synth.
+
+The XT column is not self-consistent -- one voice reads slower than four -- so
+its shape is not yet trustworthy. Retake it on an idle machine.
+
+An earlier version of this table reported the microQ at 1.28x and called it the
+best candidate. That was the note-decay artifact described in the bench's own
+history: a 3.5x error in the flattering direction, on the one measurement the
+whole iOS question rests on.
 - [ ] Give NodalRed2x the clock control the others have, if it is to be a
       candidate.
 - [ ] Apply PGO to the interpreter before judging it. It was worth +45% here and
