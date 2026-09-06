@@ -141,3 +141,35 @@ Traps that produced wrong answers here, all of them more than once:
 
 `jeDiag()` and the self-test chord are diagnostic scaffolding and should be
 removed or gated before release.
+
+## Which devices this runs on
+
+**M-series iPads. Not iPhones, and not A-series iPads.**
+
+| device class | chip | P-cores | verdict |
+|---|---|---|---|
+| iPad Pro / Air | M1, M2 | 4P + 4E | should work (inferred) |
+| iPad Pro | M4, M5 | 3-4P + 6E | **works -- measured on M5** |
+| iPhone, ANY model | A-series | 2P + 4E | **underruns -- measured on A17 Pro** |
+| iPad (base), iPad mini | A-series | 2P + 4E | won't: same topology as the phone |
+
+Measured: an M5 iPad Pro runs two simultaneous instances at 98-99% clean. An
+iPhone 15 Pro underruns, and does so at TWO stages and at FOUR alike, so the
+stage count is not what stops it.
+
+Inferred: M1/M2 iPads should be fine. The interpreted engine measures 0.70x
+serial and 2.07x pipelined on an M1, which is the same CPU as the M1 iPad Pro.
+That is a same-family measurement rather than a spec-sheet guess, but it is
+still not a test on the hardware.
+
+**No future iPhone fixes this.** Every A-series chip from the A11 to the A18 Pro
+has exactly two performance cores; the topology has not moved in seven
+generations. The A17 Pro's P-cores are individually FASTER than an M1's and it
+still underruns, so this is not about per-core speed -- serial sits below real
+time, the only way up is spreading stages, and two performance cores caps how
+much of that can be recovered.
+
+Do not read that as "the E-cores are useless": deriving the stage count from
+`hw.perflevel0.physicalcpu` to keep every stage on a P-core made the IPAD worse
+(three stages could not hold two instances that four handled), so the efficiency
+cores are carrying real work. The phone's problem is the total, not the mix.
