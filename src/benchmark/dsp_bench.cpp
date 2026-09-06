@@ -483,7 +483,12 @@ static int bench_je_fork(const char* romDir) {
         const char* q = e;
         while (*q && nbounds < JE_MAX_STAGES - 1) {
             int b = atoi(q);
-            if (b >= 1 && b <= 3 && (nbounds == 0 || b > bounds[nbounds - 1])) bounds[nbounds++] = b;
+            /* A 0 boundary (H8S alone on stage 0, ASIC0 on stage 1) would lift the
+             * pipeline's ceiling from 1.4x to ~2.3x, since stage 0 = H8S+ASIC0 is
+             * the critical path. It hangs: the H8S drives ASIC0's registers
+             * directly and stage 0 is assumed to own it. Rerouting those writes
+             * through g_je_uc_write_forward is the work that would unlock it. */
+            if (b >= 0 && b <= 3 && (nbounds == 0 || b > bounds[nbounds - 1])) bounds[nbounds++] = b;
             while (*q && *q != ',') q++;
             if (*q == ',') q++;
         }
