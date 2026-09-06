@@ -124,9 +124,20 @@ is precisely what a single-DSP Virus cannot do. Xenia's three DSPs are three
 times the work but also three threads. Note Xenia is the ESSI user, so the
 release-build logging fix above is not incidental for it.
 
-- [ ] Get microQ / MW-XT / Nord Lead 2x ROMs and measure. Each one's core clock
-      comes from its firmware's PLL setup, not from the EXTAL constant in the
-      source, so it cannot be predicted from the tree.
+**ROMs, and where they come from.** dbwbp.com/synthbin has the Microwave II
+EPROMs (two 128k halves; `xt::RomLoader` interleaves them into one 256k image)
+and Waldorf Micro Q (`microQ223.BIN`). Two snags worth recording:
+
+- The **microQ dump is byte-swapped within each 16-bit word** relative to what
+  `mqLib` expects -- it begins `2e 32 33 32` where `ROM::verifyRom()` looks for
+  the ASCII `2.23`, i.e. `32 2e 32 33`. Swap pairwise and it boots. Nothing says
+  so; the loader just reports no ROM found.
+- **Nord Lead 2 v1.04 is not Nord Lead 2x firmware** and `n2xLib` rejects it.
+  The 2x ROM is not on that page, so NodalRed2x stays unmeasured.
+
+Measured core clocks, which is the thing that could not be predicted from the
+tree: **Virus C 136 MHz, microQ 118.5 MHz, MW II/XT 81.9 MHz** (times three
+DSPs -- voice expansion is on by default).
 - [ ] Give NodalRed2x the clock control the others have, if it is to be a
       candidate.
 - [ ] Apply PGO to the interpreter before judging it. It was worth +45% here and
@@ -156,5 +167,20 @@ overall win on Move, from a build flag, bit-exact.
       and blocking waits reachable from the audio path. Both are silent until
       they fire.
 
-Not transferable: the Apple scheduling work. Linux SCHED_FIFO behaves nothing
+**Are any of these adaptable to Schwung on the Pi?** The interpreter itself is
+not -- the Pi allows JIT, so Move already runs the fast path and interpreting
+would be a ~7x regression for nothing. Three other things do transfer:
+
+- **The DSP clock control is the real one, and it is not iOS-specific.**
+  `setDspClockPercent()` already ships on the Virus, and on Move it is a direct
+  CPU-for-polyphony trade available to schwung-virus today. On the Virus at four
+  voices it was bit-identical audio down to 40% clock; half clock still held six
+  voices untouched. Nothing about that argument depends on the platform.
+- **PGO**, as below: 32.5% of Move's JP-8000 time is in compiled binary code.
+- **New module candidates.** On the JIT path -- which is what Move uses -- the
+  microQ and the Microwave XT both measure CHEAPER than the Virus that is
+  already shipped there (M1, four voices: microQ 9.1x, XT 9.6x, Virus 6.2x). If
+  that ratio survives on a CM4 they are easier ports, not harder ones.
+
+Not transferable: the interpreter, and the Apple scheduling work. Linux SCHED_FIFO behaves nothing
 like QoS/DVFS, and CLAUDE.md already covers that ground.
