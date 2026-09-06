@@ -2,14 +2,14 @@
 
 ## State
 
-Everything from the iOS session is on named branches; nothing is pushed yet.
+Everything from the iOS session is on named branches, all pushed.
 
 | repo | branch | contains |
 |---|---|---|
 | schwung-jp8000 | (current) | build_ios.sh, docs, `pgo/` profile |
 | gearmulator | `ios-sleep-window` | 14 commits: interpreter, no-JIT, iOS/AUv3, fixes, scheduling, latency |
 | dsp56300 | `ios-asmjit-bump` | submodule pointer for the asmjit fix |
-| asmjit | `ios-oscachecontrol-fix` | 4-line iOS compile fix |
+| asmjit | `ios-oscachecontrol-fix` | 4-line iOS compile fix (fork: charlesvestal/asmjit) |
 
 Result: 0.37x -> 0.70x interpreter, 1.22x -> 2.07x pipelined, ~190 ms -> ~18 ms
 latency, two AUv3 instances at 98-99% clean. Output bit-exact throughout
@@ -19,7 +19,11 @@ Tag `ios-working-2026-09-06` marks the working configuration.
 
 ## 1. Don't lose it
 
-- [ ] Push all four branches to their remotes (nothing is pushed).
+- [x] Push all four branches to their remotes. asmjit had no fork and its only
+      remote was upstream, so the one commit the whole iOS build depends on
+      existed in exactly one working copy; `dsp56300/.gitmodules` now points at
+      the fork, without which the recorded submodule commit cannot be fetched
+      and the tree does not clone.
 - [ ] Regenerate `pgo/je8086.profdata` whenever `esp.hpp`'s step loop changes;
       a stale profile degrades quietly. Better: make it a build step.
 - [ ] Fold `docs/IOS_AUV3.md` findings into CLAUDE.md, or link it from there.
@@ -63,10 +67,42 @@ and ROM-embedding in `scripts/build_ios.sh`. Any gearmulator synth inherits it.
 beside the JIT ones. So Osirus/OsTIrus, Vavra, Xenia and NodalRed2x are not
 architecturally blocked on iOS. Only speed is unknown.
 
-- [ ] Measure the DSP56300 interpreter vs its JIT on a Mac -- one number decides
-      feasibility. The JE-8086 ratio was ~20x; the Virus DSP is a busier target.
+**Measured.** `virusBench` (new, in the gearmulator tree) renders through
+`virusLib::Device` with the tree built twice. M1, Virus C, before any PGO:
+
+| voices | JIT | interpreter |
+|---|---|---|
+| idle | 7.57x | 1.11x |
+| 1 | 6.66x | 0.92x |
+| 2 | 6.59x | 0.88x |
+| 4 | 6.31x | 0.81x |
+
+**The interpreter costs 6.5-8x the JIT, not the ~20x the ESP pays**, and it is
+near real time on an M1 at light load -- so an iPad P-core has room. That is the
+encouraging half.
+
+**The discouraging half is that there is nothing to parallelise.** JE-8086
+reaches real time on iOS because four ESP ASICs are independent and go on four
+threads; a Virus is ONE DSP56300 executing one serial instruction stream, so a
+0.81x engine stays 0.81x however many cores are free. Voice-splitting across
+DSP instances is not the same emulator any more.
+
+- [ ] Establish what the polyphonic cost actually is before promising anything.
+      Above four voices the number stops being reproducible: 8 voices read
+      0.19x, 0.33x and 0.62x in three sittings while 0 and 4 voices repeat to
+      within 2%. The DSP runs on its own thread that `Device::process` waits on,
+      so wall time may have stopped measuring emulation throughput -- rule that
+      out (instrument the thread's own MIPS counter) before treating the spread
+      as real emulation cost.
 - [ ] Apply PGO to the interpreter before judging it. It was worth +45% here and
-      the shape (big switch, hot loop) is the same.
+      the shape (big switch, hot loop) is the same. At 4 voices that is roughly
+      the difference between 0.81x and playable.
+
+Two things found on the way, both fixed and pushed: `essi.cpp` logs every
+peripheral register access in RELEASE builds (`#if 1`), which an idle Virus
+turns into 4.5 GB in 40 seconds; and `DeviceCreateParams::customData` carries
+the device model but defaults to 0 = Virus A, under which a Virus C ROM boots
+at 36 MHz into a DEBUG instruction and `process()` never returns.
 - [ ] Expect to re-derive the pipeline/scheduling work per synth: the sleep
       backoff and pipeline window are tuning, not architecture.
 
