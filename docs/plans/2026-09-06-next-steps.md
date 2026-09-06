@@ -94,6 +94,41 @@ DSP instances is not the same emulator any more.
       so wall time may have stopped measuring emulation throughput -- rule that
       out (instrument the thread's own MIPS counter) before treating the spread
       as real emulation cost.
+**Underclocking is the lever, and it already ships.** `canModifyDspClock()` is
+true for the Virus and both Waldorfs, wired to the DSP/Audio settings page, and
+cost is near-linear in emulated cycles. Interpreter, 4 held voices:
+
+| DSP clock | 100% | 80% | 60% | 50% | 40% |
+|---|---|---|---|---|---|
+| real-time | 0.82x | 0.95x | 1.13x | 1.25x | 1.35x |
+
+The audio is IDENTICAL at every one of those -- at four voices the firmware fits
+inside 40% of its budget, so the clock is free headroom until voices need the
+cycles. Half clock still holds six voices untouched on this preset and starts
+dropping them at eight. A reduced-polyphony Virus is a real instrument, so this
+is a shipping configuration, not a compromise measurement.
+
+**The other DSP56300 synths, structurally** (no ROMs on hand, so nothing here is
+measured):
+
+| synth | DSPs | clock control |
+|---|---|---|
+| Osirus / OsTIrus | 1 (ABC), 2 (TI) | yes |
+| Vavra (microQ) | 1 | yes |
+| Xenia (MW II/XT) | **3** with `XT_VOICE_EXPANSION`, on by default | yes |
+| NodalRed2x | 2 | **no** -- `canModifyDspClock()` not overridden |
+
+Xenia and NodalRed2x are the interesting ones: multiple DSPs are independent and
+threadable, which is exactly the arrangement that got JE-8086 to real time, and
+is precisely what a single-DSP Virus cannot do. Xenia's three DSPs are three
+times the work but also three threads. Note Xenia is the ESSI user, so the
+release-build logging fix above is not incidental for it.
+
+- [ ] Get microQ / MW-XT / Nord Lead 2x ROMs and measure. Each one's core clock
+      comes from its firmware's PLL setup, not from the EXTAL constant in the
+      source, so it cannot be predicted from the tree.
+- [ ] Give NodalRed2x the clock control the others have, if it is to be a
+      candidate.
 - [ ] Apply PGO to the interpreter before judging it. It was worth +45% here and
       the shape (big switch, hot loop) is the same. At 4 voices that is roughly
       the difference between 0.81x and playable.
