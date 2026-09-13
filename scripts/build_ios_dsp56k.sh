@@ -21,10 +21,20 @@
 # underclocking (DSP/Audio settings page, a shipped feature) clears it. The
 # audio is bit-identical at every clock down to 40% at four voices.
 #
-# There is NO PGO here. pgo/je8086.profdata profiles the ESP interpreter, which
-# is a different hot loop in a different emulator -- applying it to dsp56kEmu
-# would be noise at best. A dsp56k profile can be generated the same way
-# (pgo/README.md) and would likely be worth a similar +45%; nobody has yet.
+# PGO: pgo/dsp56k.profdata, trained across all four synths. Worth +17% on the
+# Virus TI, measured back-to-back on an iPad Pro M5 (0.999x -> 1.17x), and
+# bit-exact on both synths where bit-exactness is measurable at all -- the ABC
+# and the TI reproduce against themselves, microQ and XT do not (2 and 3
+# distinct hashes over 3 runs of one binary), so no claim is possible there.
+#
+# +17% rather than the ESP's +45% because this interpreter was already
+# optimised. It still matters more than it looks: the iPad's SUSTAINED rate is
+# far below its cool rate -- the same binary measured 1.59x cool and 0.999x
+# after 40 minutes of benchmarking -- so +17% is the difference between sitting
+# on the 1.0x threshold and sitting above it.
+#
+# A macOS/arm64 profile applies to an iOS/arm64 build: clang profiles key on
+# function names and counter indices, not on the target. See pgo/README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -47,7 +57,17 @@ BUILD_DIR="build-ios-$SYNTH"
 [[ "$MODE" == "device" ]] && BUILD_DIR="$BUILD_DIR-device"
 EXTRA_BUILD_ARGS=()
 
+REPO="$(pwd)"
+PGO_FLAGS=""
+if [[ -f "$REPO/pgo/dsp56k.profdata" ]]; then
+  PGO_FLAGS="-fprofile-use=$REPO/pgo/dsp56k.profdata -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled"
+  echo "==> Using PGO profile pgo/dsp56k.profdata"
+else
+  echo "==> WARNING: no pgo/dsp56k.profdata -- building WITHOUT PGO, which costs ~17%"
+fi
+
 COMMON_ARGS=(
+  -DCMAKE_CXX_FLAGS="$PGO_FLAGS"
   -S libs/gearmulator
   -B "$BUILD_DIR"
   -G Xcode
