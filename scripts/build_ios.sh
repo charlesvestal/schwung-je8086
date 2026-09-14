@@ -45,6 +45,10 @@ COMMON_ARGS=(
   -Dgearmulator_SYNTH_XENIA=off
   -Dgearmulator_SYNTH_NODALRED2X=off
   -Dgearmulator_SYNTH_JE8086=on
+  # 88Emu arrived with the upstream merge and defaults ON. This script builds the
+  # JE-8086 only, and with its own PGO profile -- CMAKE_CXX_FLAGS is tree-wide, so
+  # anything else built here would silently get the ESP profile applied to it.
+  -Dgearmulator_SYNTH_88EMU=off
 )
 
 if [[ "$MODE" == "device" ]]; then
