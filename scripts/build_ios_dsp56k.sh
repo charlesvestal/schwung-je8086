@@ -43,11 +43,11 @@ MODE="${2:-simulator}"
 
 # synth key -> cmake flag, product name, default rom dir
 case "$SYNTH" in
-  osirus)      SYNTH_FLAG=OSIRUS;      PRODUCT="Osirus"     ;;
-  ostirus)     SYNTH_FLAG=OSTIRUS;     PRODUCT="OsTIrus"    ;;
-  vavra)       SYNTH_FLAG=VAVRA;       PRODUCT="Vavra"      ;;
-  xenia)       SYNTH_FLAG=XENIA;       PRODUCT="Xenia"      ;;
-  nodalred2x)  SYNTH_FLAG=NODALRED2X;  PRODUCT="NodalRed2x" ;;
+  osirus)      SYNTH_FLAG=OSIRUS;      PRODUCT="Osirus";      TARGET=osirusJucePlugin_All ;;
+  ostirus)     SYNTH_FLAG=OSTIRUS;     PRODUCT="OsTIrus";     TARGET=osTIrusJucePlugin_All ;;
+  vavra)       SYNTH_FLAG=VAVRA;       PRODUCT="Vavra";       TARGET=mqJucePlugin_All ;;
+  xenia)       SYNTH_FLAG=XENIA;       PRODUCT="Xenia";       TARGET=xtJucePlugin_All ;;
+  nodalred2x)  SYNTH_FLAG=NODALRED2X;  PRODUCT="NodalRed2x";  TARGET=n2xJucePlugin_All ;;
   *) echo "usage: $0 <osirus|ostirus|vavra|xenia|nodalred2x> [simulator|device]" >&2; exit 1 ;;
 esac
 
@@ -106,7 +106,7 @@ else
 fi
 
 echo "==> Building (config Release, sdk $SDK)"
-cmake --build "$BUILD_DIR" --config Release --target "${SYNTH}JucePlugin_All" \
+cmake --build "$BUILD_DIR" --config Release --target "$TARGET" \
   -- -sdk "$SDK" ${EXTRA_BUILD_ARGS[@]+"${EXTRA_BUILD_ARGS[@]}"}
 
 OUT="libs/gearmulator/bin/plugins-ios/Release"
@@ -121,7 +121,9 @@ if compgen -G "$ROMS/*" > /dev/null 2>&1; then
   for bundle in "$OUT/AUv3/$PRODUCT.appex" "$APP" "$APP/PlugIns/$PRODUCT.appex"; do
     [[ -d "$bundle" ]] || continue
     # every loader matches case-insensitively on extension and filters by SIZE
-    find "$ROMS" -maxdepth 1 -type f \( -iname '*.bin' -o -iname '*.mid' \) \
+    # .syx as well as .mid: factory BANK dumps ship in either container and the
+    # patch managers scan both (NodalRed2x's Factory Program Library is .syx).
+    find "$ROMS" -maxdepth 1 -type f \( -iname '*.bin' -o -iname '*.mid' -o -iname '*.syx' \) \
       -exec cp {} "$bundle/" \; && copied=1
   done
   if [[ $copied == 1 ]]; then
