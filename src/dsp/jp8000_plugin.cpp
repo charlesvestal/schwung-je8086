@@ -804,6 +804,7 @@ struct jp8000_instance_t {
      * the synth has no such switch. */
     int mode;         /* 0 patch, 1 performance, 2 system */
     int part;         /* 0 upper, 1 lower, 2 both — which patch knob edits address */
+    int mod_lever;    /* last CC1 sent through `mod_lever`, 0..127; not saved */
     int bank;         /* index into patch banks */
     int patch;        /* index within `bank` */
     int perf_bank;    /* index into performance banks */
@@ -2423,6 +2424,28 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "temp_refresh") == 0) { shm->want_temp_refresh = 1; return; }
+    if (strcmp(key, "mod_lever") == 0) {
+        /* LFO 2 is the MODULATION LEVER's LFO: its three depths are how much
+         * the lever applies, and with the lever at rest it does nothing at any
+         * rate. Measured on the firmware with the user's own performance:
+         * changing lfo2_rate 76 -> 20 rendered byte-identical audio, and the
+         * same change with CC1 = 127 moved the vibrato from 6.1 Hz to 1.35 Hz.
+         * Move has no lever, so every LFO 2 control read as dead. This is one:
+         * CC1 on both part channels and on the remote channel, so it reaches
+         * the voices whichever of the three note paths the slot uses. Not
+         * part of `state`: it is a gesture, not a setting. */
+        inst->mod_lever = clampi(atoi(val), 0, 127);
+        const jp_param_t *rc = jp_find_param("sys_remote_ch");
+        int remote = -1;
+        if (rc && param_read(inst, rc, &remote) != 0) remote = -1;
+        const int chans[3] = { 0, 1, (remote >= 0 && remote <= 15) ? remote : -1 };
+        for (int i = 0; i < 3; i++) {
+            if (chans[i] < 0 || (i == 2 && (chans[2] == chans[0] || chans[2] == chans[1]))) continue;
+            const uint8_t cc[3] = { (uint8_t)(0xB0 | chans[i]), 1, (uint8_t)inst->mod_lever };
+            midi_fifo_push(shm, cc, 3);
+        }
+        return;
+    }
     if (strcmp(key, "buffer_ms") == 0) {
         /* ms -> 88.2 kHz samples. Lowering it takes effect by simply not
          * refilling: the ring drains to the new target on its own. Raising it
@@ -2632,6 +2655,7 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
                             (int)(shm->audio_throttle / 88.2f + 0.5f) + JE_FIXED_LATENCY_MS);
         if (strcmp(key, "buffer_ms") == 0)
             return snprintf(buf, buf_len, "%d", (int)(shm->audio_throttle / 88.2f + 0.5f));
+        if (strcmp(key, "mod_lever") == 0) return snprintf(buf, buf_len, "%d", inst->mod_lever);
         if (strcmp(key, "bank") == 0) return snprintf(buf, buf_len, "%d", inst->bank);
         if (strcmp(key, "perf_bank") == 0) return snprintf(buf, buf_len, "%d", inst->perf_bank);
         if (strcmp(key, "patch") == 0) return snprintf(buf, buf_len, "%d", inst->patch);

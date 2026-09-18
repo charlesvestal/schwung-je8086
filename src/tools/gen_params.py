@@ -337,6 +337,14 @@ byKey["part"] = dict(key="part", name="Edit Part", short="Part", area=None, lin=
                      bit14=False, default=0, type="enum",
                      options=["Upper", "Lower", "Both"], min=0, max=2, off=0)
 
+# The modulation lever, as CC1. LFO 2 is the LEVER's LFO on the JP-8000: its
+# three depths say how much the lever applies, and with the lever at rest it is
+# inaudible at any rate -- measured, see `mod_lever` in jp8000_plugin.cpp. Move
+# has no lever, so without this cell every LFO 2 control reads as dead.
+byKey["mod_lever"] = dict(key="mod_lever", name="Mod Lever", short="Lever", area=None,
+                          lin=None, bit14=False, default=0, type="int",
+                          min=0, max=127, off=0)
+
 # ---- short names for the Ribbon / Velocity families -------------------------
 # 79 of these had none, and the grid labels a cell with `name` when short_name
 # is absent -- names here run to 20 characters against a ~6-character cell, so
@@ -461,7 +469,8 @@ PATCH_LEVELS = [
     # lfo1_env_dest comes here from Pitch -- DESTINATION is an LFO-section
     # control on the panel, not a pitch one.
     ("lfo1", "LFO 1", K("lfo1_waveform", "lfo1_rate", "lfo1_fade", "lfo1_env_dest")),
-    ("lfo2", "LFO 2", K("lfo2_rate", "lfo2_depth_select")),
+    # The lever sits beside LFO 2 because that is the only way to hear it.
+    ("lfo2", "LFO 2", K("lfo2_rate", "lfo2_depth_select", "mod_lever")),
     ("fx", "FX & Tone", K("chorus_type", "chorus_level", "delay_type", "delay_time", "delay_feedback",
                           "delay_level", "tone_bass", "tone_treble")),
     ("play", "Play", K("portamento", "portamento_time", "mono", "legato", "bend_up", "bend_down",
@@ -742,6 +751,8 @@ cp.append({"key": "part", "name": "Edit Part", "short_name": "Part", "type": "en
            # declared here rather than through the params loop, so it needs its own
            # short_options -- "Lower" was wrapping to LOW/ER in the square
            "short_options": ["UPP", "LOW", "BTH"]})
+cp.append({"key": "mod_lever", "name": "Mod Lever", "short_name": "Lever", "type": "int",
+           "min": 0, "max": 127, "default": 0})
 for p in params:
     if p["key"] in CP_SKIP: continue
     e = {"key": p["key"], "name": p["name"], "type": p["type"]}

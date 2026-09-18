@@ -480,6 +480,59 @@ nothing paginated, nothing wrapped, two-option settings drawn as switches. A
 per-level layout pin is a host feature and is still not built; nothing here needs
 it.
 
+## "The LFOs are broken"
+
+Reported from the Remote UI on 2026-09-17; nothing was. Three facts, each
+measured on the user's own slot state (528-byte temp replayed into
+`jp8000_render` as DT1s, note on the keyboard path, plus the live slot driven
+through the manager's WebSocket and confirmed by `temp_refresh`):
+
+**LFO 2 is the modulation lever's LFO.** Its three depths say how much the
+lever (CC1) applies, and with the lever at rest it is inaudible at any rate:
+`lfo2_rate` 76 -> 20 rendered BYTE-IDENTICAL audio; the same change with CC1 =
+127 moved the vibrato from 6.1 Hz to 1.35 Hz (110 -> 15.4 Hz). Move has no
+lever, so every LFO 2 control read as dead. `mod_lever` (set_param, 0..127) now
+sends CC1 on ch 1, ch 2 and the remote channel; the Remote UI and the device's
+LFO 2 page carry it. Verified through the plugin with `plugin_params` +
+`PLUGIN_PARAMS_RAW`: pitch spread 0.6% at rest, 14.9% at 127, 1.2% after
+release.
+
+**LFO 2 Depth Select is not a router.** All three depths apply at once; the
+selector only picks which one the panel's single Depth knob edits. "Feedback
+Lead U" has pitch +8 / filter +27 / amp -64, so the lever gives a tremolo
+whatever the selector says, and the firmware keeps every selector value written
+(0/1/2 read back). Reported as "LFO 2 always points to AMP". The page now shows
+all three knobs and captions every non-zero one.
+
+**LFO 1 has no depth of its own.** INIT PATCH -- which is what the user's
+performance played -- has OSC, Filter and Amp LFO 1 depth all at 0, so
+waveform, rate and fade change nothing. With a depth set the same writes
+modulate cleanly (filter depth +63, sync 1/4 dotted @120: 1.34 Hz, exactly).
+The Remote UI's LFO 1 scope now lists the live destinations or says NO DEPTH
+SET, and -- departing from the panel, at the user's request after a second
+"still nothing" -- the LFO 1 section holds the OSC / Filter / Amp depth knobs
+and the Amp LFO 1 mode switch itself.
+
+**Tempo sync was there, on the wrong tab.** `up_/lo_lfo1_sync` (23 options),
+`delay_sync`, `chorus_sync` are PART parameters and sat in the Parts section on
+the last tab. The user found them on the device's Parts page instead and set
+both parts' LFO 1 sync -- which makes the Rate knob inert by design, and was
+then read as further proof. They now sit with LFO 1 / Delay / Chorus as
+edit-part selects. Sync with no MIDI clock arriving runs off the performance
+tempo (C and E renders byte-identical with MidiSync on and off); with a clock it
+follows it (1/4 @120 -> ~2 Hz).
+
+**Under Key Mode SINGLE only the panel-selected part sounds.** Panel = LOWER
+here, so the Lower INIT PATCH played while the header said "Sad Saw" and
+"UPR+LWR"; a note to the Upper's own channel rendered silence, and edits to the
+Upper were inaudible (byte-identical to no edit). The header now says LWR ONLY
+/ UPR ONLY.
+
+`jp8000_render` takes `patch <off> <val> [upper|lower]` and `part <off> <val>
+[upper|lower]` for this kind of test, and `patch_file` replays a temp image as
+DT1s (`mk_user_syx.py`-style: 5 blocks, packed addresses, 128-byte chunks).
+`plugin_params` takes `PLUGIN_PARAMS_RAW=<path>` to keep the drained audio.
+
 ## The Remote UI
 
 `src/remote/web_ui.html` + `assets/` is the module's browser panel, shown by

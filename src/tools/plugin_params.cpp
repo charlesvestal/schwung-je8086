@@ -12,7 +12,9 @@
  * ops:   key            get, print "key = value"
  *        key=value      set
  *        @ms            sleep this many milliseconds
+ *        note:on:60:100:3   note on (note, velocity, 1-based channel); note:off:60:0:3
  * With no ops, dumps a default survey of the UI-facing keys.
+ * PLUGIN_PARAMS_RAW=<path> writes the drained audio (int16 stereo, 44.1 kHz).
  */
 #include <cstdio>
 #include <cstdlib>
@@ -62,11 +64,21 @@ struct pump_arg { plugin_api_v2_t *api; void *inst; volatile bool stop; };
  * service under the throttle stopped with it -- so a bank switch or a preset
  * load never completed. With that fixed, running WITHOUT the pump is the
  * regression test for it. */
+/* PLUGIN_PARAMS_RAW=<path> keeps what the pump drains: raw int16 stereo at
+ * 44.1 kHz, the same format plugin_drive writes. A get/set script can then be
+ * MEASURED rather than trusted -- a parameter that reads back fine may still
+ * do nothing to the sound (the mod lever was found that way). */
 static void *render_pump(void *a) {
     pump_arg *p = (pump_arg*)a;
     if (getenv("PLUGIN_PARAMS_NO_PUMP")) return nullptr;
+    FILE *raw = getenv("PLUGIN_PARAMS_RAW") ? fopen(getenv("PLUGIN_PARAMS_RAW"), "wb") : nullptr;
     int16_t buf[256];
-    while (!p->stop) { p->api->render_block(p->inst, buf, 128); usleep(2900); }
+    while (!p->stop) {
+        p->api->render_block(p->inst, buf, 128);
+        if (raw) fwrite(buf, sizeof(buf), 1, raw);
+        usleep(2900);
+    }
+    if (raw) fclose(raw);
     return nullptr;
 }
 static int host_midi_noop(const uint8_t*, int) { return 0; }

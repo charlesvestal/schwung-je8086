@@ -186,6 +186,29 @@ static bool parse_script(const std::string &path, Script &out, uint32_t samplera
             fprintf(stderr, "\n");
             out.events.push_back({t_samp, ev});
             continue;
+        } else if (action == "patch" || action == "part") {
+            /* patch <Patch offset> <value> [upper|lower]
+             * part  <Part offset>  <value> [upper|lower]
+             * A DT1 into the temp performance, the same bytes the Schwung
+             * plugin's param_write_block emits for a knob. Default Upper. */
+            int off, val; std::string which;
+            iss >> off >> val;
+            if (!(iss >> which)) which = "upper";
+            const bool lower = (which == "lower");
+            jeLib::State::Dump d;
+            if (action == "patch")
+                d = State::createParameterChange(lower ? jeLib::PerformanceData::PatchLower : jeLib::PerformanceData::PatchUpper,
+                                                 (jeLib::Patch)off, val);
+            else
+                d = State::createParameterChange(lower ? jeLib::PerformanceData::PartLower : jeLib::PerformanceData::PartUpper,
+                                                 (jeLib::Part)off, val);
+            ev.sysex.assign(d.begin(), d.end());
+            ev.a = 0; ev.b = 0; ev.c = 0;
+            fprintf(stderr, "[script] %s %s %#04x = %d ->", action.c_str(), which.c_str(), off, val);
+            for (auto b : ev.sysex) fprintf(stderr, " %02X", b);
+            fprintf(stderr, "\n");
+            out.events.push_back({t_samp, ev});
+            continue;
         } else if (action == "sysreq") {
             /* Ask the firmware for its system area.  A reply proves the whole
              * sysex round trip -- injection, parse, and DT1 out -- which is
