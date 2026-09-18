@@ -157,10 +157,53 @@ left block Controller / LFO 2 / Keyboard; and the two Parts plus the external
 trigger, which the panel keeps in the LCD. Widgets follow the panel too:
 waveforms and types are LED columns, envelopes are faders, the long lists the
 hardware scrolls through on the LCD (beat pattern, chorus and delay type, sync)
-are selects. LFO 2 has ONE depth knob that follows Depth Select, as the panel
-has, with the three bytes behind it. The System area is a mode you enter
+are selects. LFO 2 shows all THREE depth knobs: Depth Select is not a router,
+it only names the one the panel's single Depth knob edits, and every non-zero
+depth is heard at once (measured: pitch +8 / filter +27 / amp -64 gave a
+tremolo whatever the selector said). The first cut hid the two unselected
+knobs, which read as routing. The System area is a mode you enter
 (SHIFT/EXIT on the hardware), not a page of the performance, so it replaces the
 panel while selected.
+
+**The three tempo syncs sit with LFO 1, Chorus and Delay, not with the Parts.**
+They are part parameters in the sysex (one per part, beside MIDI channel and
+transpose), which is where the first cut put them -- on the last tab, where
+nobody looking at an LFO found them, and "the LFOs have no sync option" was the
+report. They are now edit-part selects (`partSelectWidget`): they read the edit
+part's value and write both under Both, like the patch knobs. While LFO 1 sync is
+on, the Rate knob is drawn inert, because the firmware ignores it; the scope
+then runs at the clocked rate and names it. Same for Delay Time under delay
+sync.
+
+**The LFO 1 section carries its depths, which the panel does not.** On the
+hardware the OSC / Filter / Amp LFO 1 depth knobs sit in those three sections,
+and INIT PATCH has all of them at zero, so waveform, rate and fade did nothing
+and "the LFOs are broken" was the report -- twice, the second time after the
+display had named the knobs to turn. The three depth knobs and the Amp LFO 1
+mode switch (LFO 1 / auto pan / manual pan, which decides what the Amp depth
+means) now live in the LFO 1 section; Control 2 on the PWM and TRI MOD waves
+still carries LFO 1 from the oscillator sections. The section is built as
+SOURCE then DESTINATIONS: a `group` is a captioned row that wraps as a unit, a
+`stack` puts a knob over the option that qualifies it (OSC depth over its
+target, Amp depth over Pan, Rate/Fade over Tempo Sync), and the widths are
+chosen for the ~310px a section gets in the Manager on an iPad, where the first
+cut wrapped into a ragged pile. LFO 2 has the same shape: Rate beside the lever,
+then the three depths with the panel's Depth Select demoted to a "Panel Knob"
+column beside them. The scope's top line lists the
+live destinations or says "NO DEPTH SET".
+
+**LFO 2 is the modulation lever's LFO, and the section carries a lever.** The
+three LFO 2 depths are how much the lever applies; with the lever at rest the
+rate does nothing (measured: rate 76 -> 20 rendered byte-identical audio; with
+CC1 = 127 the vibrato moved from 6.1 Hz to 1.35 Hz). Move has no lever, so the
+page has one: `mod_lever`, a plugin control that sends CC1 on both part
+channels and the remote channel. It springs back on release, double-click
+latches it. It is not in `state`; it is a gesture. The device UI's LFO 2 page has
+the same cell.
+
+**Under Key Mode SINGLE only the panel-selected part sounds**, so the header
+reads "LWR ONLY" / "UPR ONLY" in Performance mode instead of "UPR+LWR". A note
+to the Upper's own MIDI channel rendered silence in that state.
 
 **The widths that matter are the Manager's, not the screen's.** The Manager's
 page column is capped at 1200px and pads twice on the way down, so the iframe is

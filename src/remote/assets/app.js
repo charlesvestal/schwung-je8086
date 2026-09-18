@@ -25,6 +25,7 @@
         part: 0,              // Edit Part: 0 upper, 1 lower, 2 both
         bank: 0, patch: 0, perf_bank: 0, performance: 0,
         buffer_ms: null,
+        mod_lever: 0,         // the page's own lever position; the plugin starts at rest too
         names: {},            // hierarchy params the manager pushes: patch_name, patch_count, ...
         catalog: null,        // banks_index.json, written by the module's child at boot
         chain: null,          // chain_params (bank enums as a fallback for bank names)
@@ -72,6 +73,7 @@
         refreshKey(key);
         lcdShow(p, value);
         redrawViz([key]);
+        if (key === "key_mode") refreshHeader();       // the header says which part sounds
     }
 
     /* ---- inbound ------------------------------------------------------------- */
@@ -265,8 +267,13 @@
             var row = perf ? S.performance : S.patch;
             var bankName = bankLabel(perf ? S.perf_bank : S.bank, perf) || "";
             l1 = pad(name || "(no name)", 16) + rpad(row + 1, 4);
-            var partTxt = perf ? "UPR+LWR" : ["UPPER", "LOWER", "BOTH"][S.part] || "";
-            l2 = pad(bankName.toUpperCase(), 12) + rpad(partTxt, 8);
+            /* In Key Mode SINGLE only the panel-selected part sounds -- measured
+             * on this state: a note to the Upper's own channel rendered silence
+             * -- so "UPR+LWR" would name a part that is not playing. */
+            var single = perf && S.temp && M.readParam(S.temp, byKey.key_mode, 0) === 0;
+            var partTxt = perf ? (single ? (S.part === 1 ? "LWR ONLY" : S.part === 0 ? "UPR ONLY" : "UPR+LWR") : "UPR+LWR")
+                               : ["UPPER", "LOWER", "BOTH"][S.part] || "";
+            l2 = pad(bankName.toUpperCase(), 11) + " " + rpad(partTxt, 8);
         }
         if (S.lcdText && Date.now() < S.lcdUntil) l2 = S.lcdText;
         el.lcd1.textContent = l1;
@@ -659,14 +666,33 @@
      * finger lifts. */
     var DRAG = { n: 0 };
     function draggingNow() { return DRAG.n > 0; }
+    /* Double-TAP, from pointer events, so it works on an iPad. `dblclick`
+     * does not: once a knob captures the pointer and preventDefaults the
+     * down, Safari never synthesises it for touch, so "double-click to reset"
+     * was mouse-only. Two downs within 350 ms and 24 px count. */
+    function onDoubleTap(node, fn) {
+        var last = 0, lx = 0, ly = 0;
+        node.addEventListener("pointerdown", function (e) {
+            if (e.button !== 0 && e.pointerType === "mouse") return;
+            var now = Date.now();
+            if (now - last < 350 && Math.abs(e.clientX - lx) < 24 && Math.abs(e.clientY - ly) < 24) { last = 0; fn(e); }
+            else { last = now; lx = e.clientX; ly = e.clientY; }
+        });
+    }
+    /* A control's default, as a double-tap: registered BEFORE the drag
+     * binding, so the drag that the second tap starts begins from the reset
+     * value rather than dragging the old one back in. */
+    function bindReset(node, fn) { onDoubleTap(node, function (e) { fn(); e.preventDefault(); }); }
+
     function bindRange(node, p, get, commit, pixels) {
         var startY = 0, startV = 0, dragging = false, acc = 0;
         var span = p.max - p.min;
+        bindReset(node, function () { commit(p.default); });
         node.addEventListener("pointerdown", function (e) {
             if (e.button !== 0 && e.pointerType === "mouse") return;
             dragging = true; startY = e.clientY; startV = get(); acc = 0; DRAG.n++;
             node.classList.add("dragging");
-            node.setPointerCapture(e.pointerId);
+            try { node.setPointerCapture(e.pointerId); } catch (x) { /* synthetic event */ }
             node.focus({ preventScroll: true });
             e.preventDefault();
         });
@@ -688,7 +714,6 @@
             var n = Math.trunc(acc / step); acc -= n * step;
             commit(get() - n * (e.shiftKey ? 5 : 1));
         }, { passive: false });
-        node.addEventListener("dblclick", function () { commit(p.default); });
         node.addEventListener("keydown", function (e) {
             var v = get(), d = 0;
             switch (e.key) {
@@ -843,7 +868,8 @@
 
     function ledsWidget(key, opts) {
         var p = byKey[key];
-        var c = document.createElement("div"); c.className = "cell leds" + (opts.inline ? " row" : "");
+        var c = document.createElement("div"); c.className = "cell leds" + (opts.inline ? " row" : "") + (opts.cls ? " " + opts.cls : "");
+        if (opts.title) c.title = opts.title;
         var l = document.createElement("div"); l.className = "label"; l.textContent = opts.label || p.name; c.appendChild(l);
         var g = document.createElement("div"); g.className = "opts"; g.setAttribute("role", "radiogroup"); g.setAttribute("aria-label", p.name);
         var btns = p.options.map(function (name, i) {
@@ -855,6 +881,7 @@
             g.appendChild(b); return b;
         });
         c.appendChild(g);
+        bindReset(c, function () { (opts.commit || edit)(key, p.default); });
         function set(v, ghost, pending) {
             btns.forEach(function (b, i) { b.setAttribute("aria-checked", String(v === i)); b.classList.toggle("ghosted", ghost === i); });
             c.classList.toggle("pending", !!pending);
@@ -872,6 +899,7 @@
         var cur = 0;
         b.addEventListener("click", function () { edit(key, cur ? 0 : 1); });
         c.appendChild(b);
+        bindReset(c, function () { edit(key, p.default); });
         function set(v, ghost, pending) {
             cur = v ? 1 : 0;
             b.setAttribute("aria-checked", String(!!v));
@@ -891,18 +919,96 @@
         p.options.forEach(function (name, i) { var o = document.createElement("option"); o.value = i; o.textContent = name; s.appendChild(o); });
         s.addEventListener("change", function () { edit(key, parseInt(s.value, 10)); });
         c.appendChild(l); c.appendChild(s);
+        bindReset(l, function () { edit(key, p.default); });
+        l.title = "Double-tap to reset";
         function set(v, ghost, pending) { if (v !== null && v !== undefined) s.value = String(v); c.classList.toggle("pending", !!pending); }
         return { el: c, set: set };
     }
 
-    /* LFO 2: one Depth knob following the Depth Select switch, as on the panel. */
+    /* A PART parameter drawn in a patch section (the three tempo syncs): one
+     * select that follows Edit Part the way the patch knobs do -- reads the
+     * edit part's value, writes both under Both. Registered under both real
+     * keys, so a refresh of either lands here; set() ignores what it is handed
+     * and reads the part it is showing. `item.inert` names a knob the firmware
+     * ignores while sync is on (Rate for LFO 1, Time for the delay). */
+    function partSelectWidget(item) {
+        var keys = [M.partKey(item, 0), M.partKey(item, 1)], p = byKey[keys[0]];
+        var c = document.createElement("div"); c.className = "cell select perpart";
+        var l = document.createElement("label"); l.className = "label"; l.textContent = item.label;
+        var s = document.createElement("select"); s.setAttribute("aria-label", item.label);
+        var id = "sel_" + item.key + "_" + Math.random().toString(36).slice(2, 7); s.id = id; l.htmlFor = id;
+        p.options.forEach(function (name, i) { var o = document.createElement("option"); o.value = i; o.textContent = name; s.appendChild(o); });
+        function put(val) {
+            if (S.part === 2) { edit(keys[0], val); edit(keys[1], val); }
+            else edit(keys[editPart()], val);
+        }
+        s.addEventListener("change", function () { put(parseInt(s.value, 10)); });
+        c.appendChild(l); c.appendChild(s);
+        bindReset(l, function () { put(p.default); });
+        l.title = "Double-tap to reset";
+        function set() {
+            var k = keys[editPart()], val = valueOf(k);
+            if (val !== null && val !== undefined) s.value = String(val);
+            l.setAttribute("data-part", ["UP", "LO", "U+L"][S.part] || "UP");
+            c.classList.toggle("pending", !!S.pending[k]);
+            if (item.inert && W[item.inert]) {
+                var on = !!val;
+                W[item.inert].el.classList.toggle("inert", on);
+                W[item.inert].el.title = on ? "Ignored while Tempo Sync is on" : "";
+            }
+        }
+        return { el: c, set: set, keys: keys };
+    }
+
+    /* The modulation lever: a plugin control, CC1, not a temp byte. Spring
+     * loaded like the real one -- it goes back to rest when released -- so a
+     * held drag is the audition and nothing is left engaged by accident.
+     * Double-click latches it, as a held lever would, until the next release. */
+    function leverWidget(item) {
+        var meta = (JP.controls || []).filter(function (x) { return x.key === item.key; })[0] || { min: 0, max: 127, default: 0, name: "Mod Lever" };
+        var p = { key: item.key, min: meta.min, max: meta.max, default: meta.default, name: meta.name, off: 0, neg: false, options: null };
+        var c = cell(item.label, "lever");
+        var s = document.createElement("div");
+        s.className = "slider lever"; s.tabIndex = 0; s.setAttribute("role", "slider");
+        s.setAttribute("aria-label", "Modulation lever"); s.setAttribute("aria-valuemin", p.min); s.setAttribute("aria-valuemax", p.max);
+        var rail = document.createElement("div"); rail.className = "rail";
+        var fill = document.createElement("div"); fill.className = "fill";
+        var capel = document.createElement("div"); capel.className = "capel";
+        s.appendChild(rail); s.appendChild(fill); s.appendChild(capel);
+        c.el.appendChild(s); c.el.appendChild(c.value);
+        var cur = 0, latched = false;
+        function show(v) {
+            cur = v;
+            var top = 6 + (1 - v / p.max) * 104;
+            capel.style.top = top + "px"; fill.style.height = (110 - top) + "px";
+            c.value.textContent = v ? String(v) : "rest";
+            s.setAttribute("aria-valuenow", v);
+            c.el.classList.toggle("engaged", v > 0);
+        }
+        function send(v) { v = Math.max(p.min, Math.min(p.max, Math.round(v))); S.mod_lever = v; show(v); setParam(item.key, v); redrawViz([item.key]); }
+        bindRange(s, p, function () { return cur; }, send, 104);
+        s.addEventListener("pointerup", function () { if (!latched && cur) send(0); });
+        s.addEventListener("pointercancel", function () { if (!latched && cur) send(0); });
+        onDoubleTap(s, function () { latched = !latched; if (!latched) send(0); else if (!cur) send(p.max); c.el.classList.toggle("latched", latched); });
+        s.addEventListener("keydown", function (e) { if (e.key === "Escape" || e.key === "0") { latched = false; c.el.classList.remove("latched"); send(0); } });
+        show(0);
+        return { el: c.el, set: function (v) { if (v !== null && v !== undefined && !isNaN(v)) show(v); } };
+    }
+
+    /* LFO 2's three depths. ALL THREE APPLY AT ONCE: Depth Select is not a
+     * router, it only picks which of them the panel's single Depth knob edits
+     * (measured: with pitch +8 / filter +27 / amp -64 the lever gave a tremolo
+     * whatever the selector said, and the firmware kept every selector value).
+     * The first cut hid the two unselected knobs, which read as "pointing at
+     * PITCH" while the sound was plainly AMP. All three show; the selected
+     * one is marked, as the panel knob would address it. */
     function lfo2DepthWidget(item) {
         var keys = item.keys;
-        var wrap = document.createElement("div"); wrap.className = "stack";
-        var knobs = keys.map(function (k) { var w = knobWidget(k, { label: byKey[k].name.replace(/ LFO2$/, "") + " depth" }); wrap.appendChild(w.el); return w; });
+        var wrap = document.createElement("div"); wrap.className = "lfo2depths";
+        var knobs = keys.map(function (k) { var w = knobWidget(k, { label: byKey[k].name.replace(/ LFO2$/, "") }); wrap.appendChild(w.el); return w; });
         function show() {
             var sel = valueOf("lfo2_depth_select");
-            knobs.forEach(function (w, i) { w.el.hidden = sel !== null && sel !== i; });
+            knobs.forEach(function (w, i) { w.el.classList.toggle("selected", sel === i); });   /* the one the hardware knob edits */
         }
         return { el: wrap, knobs: knobs, show: show };
     }
@@ -1009,8 +1115,8 @@
          * embeds it (its column is capped at 1200px, so the iframe is ~1084px on a
          * Mac and ~908px on an iPad in landscape). Under 1000px the rows dissolve
          * into a two-column flow (style.css). */
-        var COLS = { "row-top": "1.45fr 1.95fr 1.6fr", "row-main": "1fr 1.65fr 2.6fr 1.75fr", "row-lower": "1.9fr 0.9fr 1fr 1.6fr", "row-left": "1.9fr 1.1fr 1.7fr", "row-parts": "2fr 1.4fr" };
-        var COLS_MD = { "row-top": "1.35fr 1.85fr 1.8fr", "row-main": "1.3fr 1.5fr 2.3fr 1.9fr", "row-lower": "2fr 1fr 1.1fr 1.7fr", "row-left": "1.9fr 1.2fr 1.8fr", "row-parts": "2fr 1.4fr" };
+        var COLS = { "row-top": "1.8fr 1.6fr 1.6fr", "row-main": "1fr 1.65fr 2.6fr 1.75fr", "row-lower": "1.9fr 0.9fr 1fr 1.6fr", "row-left": "1.9fr 1.1fr 1.7fr", "row-parts": "2fr 1.4fr" };
+        var COLS_MD = { "row-top": "1.8fr 1.5fr 1.7fr", "row-main": "1.3fr 1.5fr 2.3fr 1.9fr", "row-lower": "2fr 1fr 1.1fr 1.7fr", "row-left": "1.9fr 1.2fr 1.8fr", "row-parts": "2fr 1.4fr" };
         var sectionNo = 0;
         M.PANEL.forEach(function (row) {
             var r = document.createElement("div"); r.className = "row"; r.id = row.id;
@@ -1024,31 +1130,7 @@
                 if (sec.viz) { s.classList.add("has-viz"); s.appendChild(vizFor(sec.viz)); }
                 var cells = document.createElement("div"); cells.className = "cells";
                 if (sec.parts) buildParts(cells, sec);
-                else {
-                    var env = null;
-                    sec.items.forEach(function (it) {
-                        var w = null;
-                        switch (it.widget) {
-                            case "knob": w = knobWidget(it.key, it); break;
-                            case "slider":
-                                w = sliderWidget(it.key, it);
-                                if (!env) { env = document.createElement("div"); env.className = "env"; env.setAttribute("role", "group"); env.setAttribute("aria-label", "Envelope"); cells.appendChild(env); }
-                                env.appendChild(w.el); W[it.key] = w; return;
-                            case "leds": w = ledsWidget(it.key, it); break;
-                            case "switch": w = switchWidget(it.key, it); break;
-                            case "select": w = selectWidget(it.key, it); break;
-                            case "drawer": cells.appendChild(drawerFor(it)); return;
-                            case "lfo2depth": {
-                                var ld = lfo2DepthWidget(it);
-                                ld.knobs.forEach(function (k, i) { W[it.keys[i]] = k; });
-                                var sel = W.lfo2_depth_select;
-                                if (sel) { var oset = sel.set; sel.set = function (v, g, pnd) { oset(v, g, pnd); ld.show(); }; }
-                                cells.appendChild(ld.el); return;
-                            }
-                        }
-                        if (w) { W[it.key] = w; cells.appendChild(w.el); }
-                    });
-                }
+                else buildItems(cells, sec.items);
                 s.appendChild(cells);
                 r.appendChild(s);
             });
@@ -1077,7 +1159,7 @@
         panel.appendChild(system);
 
         var foot = document.createElement("div"); foot.className = "foot";
-        foot.innerHTML = '<span>Drag a knob up or down. <span class="kbd">Shift</span> for fine steps, double-click to reset, arrow keys when focused.</span><span>Roland JP-8000 panel order, sections 1–22 of the Owner’s Manual.</span>';
+        foot.innerHTML = '<span>Drag a knob up or down. Double-tap any control (a select\u2019s label) to reset it; <span class="kbd">Shift</span> for fine steps, arrow keys when focused.</span><span>Roland JP-8000 panel order, sections 1–22 of the Owner’s Manual.</span>';
         panel.appendChild(foot);
 
         el.panel = panel;
@@ -1118,6 +1200,49 @@
         bindRange(k, p, function () { return cur; }, function (v) { v = Math.max(p.min, Math.min(p.max, Math.round(v))); S.buffer_ms = v; set(v); setParam("buffer_ms", v); }, 140);
         inline.appendChild(k); inline.appendChild(val); c.appendChild(l); c.appendChild(inline);
         return { el: c, set: set };
+    }
+
+    /* The cells of one section (or of one group inside it). A "group" is a
+     * row that wraps as a unit, with an optional caption: the difference
+     * between eleven controls in a flex-wrap and a section that reads. */
+    function buildItems(cells, items) {
+        var env = null;
+        items.forEach(function (it) {
+            var w = null;
+            switch (it.widget) {
+                case "group": {
+                    var gd = document.createElement("div"); gd.className = "group" + (it.cls ? " " + it.cls : "");
+                    gd.setAttribute("role", "group");
+                    if (it.label) { var gl = document.createElement("div"); gl.className = "gl"; gl.textContent = it.label; gd.appendChild(gl); gd.setAttribute("aria-label", it.label); }
+                    var gc = document.createElement("div"); gc.className = "cells";
+                    buildItems(gc, it.items); gd.appendChild(gc); cells.appendChild(gd); return;
+                }
+                case "stack": {
+                    var sd = document.createElement("div"); sd.className = "stack";
+                    buildItems(sd, it.items); cells.appendChild(sd); return;
+                }
+                case "knob": w = knobWidget(it.key, it); break;
+                case "slider":
+                    w = sliderWidget(it.key, it);
+                    if (!env) { env = document.createElement("div"); env.className = "env"; env.setAttribute("role", "group"); env.setAttribute("aria-label", "Envelope"); cells.appendChild(env); }
+                    env.appendChild(w.el); W[it.key] = w; return;
+                case "leds": w = ledsWidget(it.key, it); break;
+                case "switch": w = switchWidget(it.key, it); break;
+                case "select":
+                    if (it.perPart) { w = partSelectWidget(it); W[w.keys[0]] = W[w.keys[1]] = w; cells.appendChild(w.el); return; }
+                    w = selectWidget(it.key, it); break;
+                case "lever": w = leverWidget(it); W[it.key] = w; cells.appendChild(w.el); return;
+                case "drawer": cells.appendChild(drawerFor(it)); return;
+                case "lfo2depth": {
+                    var ld = lfo2DepthWidget(it);
+                    ld.knobs.forEach(function (k, i) { W[it.keys[i]] = k; });
+                    var sel = W.lfo2_depth_select;
+                    if (sel) { var oset = sel.set; sel.set = function (v, g, pnd) { oset(v, g, pnd); ld.show(); }; }
+                    cells.appendChild(ld.el); return;
+                }
+            }
+            if (w) { W[it.key] = w; cells.appendChild(w.el); }
+        });
     }
 
     function buildParts(cells, sec) {
@@ -1310,8 +1435,37 @@
         if (n === 2) { var rg = v("osc2_range", 0), fn = v("osc2_fine", 0); txt += "   " + (rg > 0 ? "+" : "") + rg + " st " + (fn > 0 ? "+" : "") + fn + (v("osc2_sync", 0) ? "  SYNC" : ""); }
         label(g, h, txt);
     }
-    function drawLfoScope(c, shape, rate, fade, phase, text) {
+    /* a part parameter read for the edit part, e.g. vPart("lfo1_sync") */
+    function vPart(base, d) { return v((editPart() === 1 ? "lo_" : "up_") + base, d); }
+    function vLever() { if (depTrack) depTrack.mod_lever = 1; return S.mod_lever || 0; }
+    /* Beats per cycle for the 23 LFO1 Sync options (OFF, 1/16 .. 8 MEASURES),
+     * so the scope can run at the clocked rate and name it. */
+    var SYNC_BEATS = [0, 0.25, 1 / 3, 0.375, 0.5, 2 / 3, 0.75, 1, 4 / 3, 1.5, 2, 8 / 3, 3, 4, 16 / 3, 6, 8, 12, 16, 20, 24, 28, 32];
+    function lfo1Hz() {
+        var sync = vPart("lfo1_sync", 0);
+        if (sync > 0 && SYNC_BEATS[sync]) return v("tempo", 120) / 60 / SYNC_BEATS[sync];
+        return 0.15 + v("lfo1_rate", 64) / 127 * 2.2;      // the free-running scope speed
+    }
+    /* Where LFO 1 goes in this patch. Four knobs and two Control 2s can carry
+     * it; when all of them read zero the section is inaudible, which is the
+     * first thing to say about it. */
+    function lfo1Dests() {
+        var out = [];
+        var o = v("osc_lfo1_depth", 0); if (o) out.push("OSC " + (o > 0 ? "+" : "") + o);
+        if (v("osc1_waveform", 0) === 1 && v("osc1_ctrl2", 0)) out.push("OSC1 TRI " + v("osc1_ctrl2", 0));
+        if (v("osc1_waveform", 0) === 4 && v("osc1_ctrl2", 0)) out.push("OSC1 PWM " + v("osc1_ctrl2", 0));
+        if (v("osc2_waveform", 0) === 0 && v("osc2_ctrl2", 0)) out.push("OSC2 PWM " + v("osc2_ctrl2", 0));
+        if (v("osc2_waveform", 0) === 2 && v("osc2_ctrl2", 0)) out.push("OSC2 TRI " + v("osc2_ctrl2", 0));
+        var f = v("filter_lfo1_depth", 0); if (f) out.push("FILTER " + (f > 0 ? "+" : "") + f);
+        var a = v("amp_lfo1_depth", 0), am = v("amp_lfo1_mode", 0);
+        if (am === 0 && a) out.push("AMP " + (a > 0 ? "+" : "") + a);
+        if (am === 1) out.push("AUTO PAN " + a);
+        return out;
+    }
+
+    function drawLfoScope(c, shape, rate, fade, phase, text, top) {
         var o = ctx2d(c), g = o.g, w = o.w, h = o.h; grid(g, w, h);
+        if (top) { g.fillStyle = top.warn ? "rgba(255,120,90,0.95)" : AMBER_DIM; g.font = "600 9px " + mono(); g.fillText(top.text, 6, 12); }
         var cycles = 1.5 + rate * 6;
         var P = new Path2D();
         {
@@ -1332,13 +1486,23 @@
     }
     var animRaf = 0, animLast = 0;
     function drawLfo1(c) {
-        var r1 = v("lfo1_rate", 64) / 127;
-        drawLfoScope(c, v("lfo1_waveform", 0), r1, v("lfo1_fade", 0) / 127, lfoPhase, ["TRI", "SAW", "SQR", "RND"][v("lfo1_waveform", 0)] + "  " + v("lfo1_rate", 64));
+        var sync = vPart("lfo1_sync", 0), r1 = v("lfo1_rate", 64) / 127;
+        if (sync > 0) r1 = Math.min(1, Math.max(0.05, lfo1Hz() / 2.4));      // a clocked cycle, roughly to scale
+        var dests = lfo1Dests();
+        var txt = ["TRI", "SAW", "SQR", "RND"][v("lfo1_waveform", 0)] + "  " +
+            (sync > 0 ? "SYNC " + byKey.up_lfo1_sync.options[sync] + " @" + v("tempo", 120) : "RATE " + v("lfo1_rate", 64));
+        drawLfoScope(c, v("lfo1_waveform", 0), r1, v("lfo1_fade", 0) / 127, lfoPhase, txt,
+            dests.length ? { text: "\u2192 " + dests.join("  ") } : { text: "\u2192 NO DEPTH SET \u2014 TURN A DEPTH KNOB BELOW", warn: true });
     }
     function drawLfo2(c) {
-        var r2 = v("lfo2_rate", 64) / 127, dest = v("lfo2_depth_select", 0);
-        var depthKey = ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"][dest];
-        drawLfoScope(c, 0, r2, 0, lfo2Phase, "TRI  " + v("lfo2_rate", 64) + "  \u2192 " + ["PITCH", "FILTER", "AMP"][dest] + " " + (v(depthKey, 0) > 0 ? "+" : "") + v(depthKey, 0));
+        var r2 = v("lfo2_rate", 64) / 127, lever = vLever();
+        var depths = ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"].map(function (k) { return v(k, 0); });
+        var any = depths.some(function (d) { return d !== 0; });
+        /* every non-zero depth is heard, not just the selected one */
+        var goes = ["PITCH", "FILT", "AMP"].map(function (n, i) { return depths[i] ? n + " " + (depths[i] > 0 ? "+" : "") + depths[i] : null; }).filter(Boolean);
+        drawLfoScope(c, 0, r2, 0, lfo2Phase, "TRI  " + v("lfo2_rate", 64) + "  \u2192 " + (goes.length ? goes.join("  ") : "NO DEPTH"),
+            lever > 0 ? { text: "LEVER " + lever + (any ? "" : "  (all three depths are 0)"), warn: !any }
+                      : { text: "AT REST \u2014 HEARD ONLY THROUGH THE LEVER", warn: true });
     }
     /* The two scopes move at 30 fps, and stand still while a finger is on a
      * control: a drag frame is not the moment to redraw two wide displays. */
@@ -1350,8 +1514,9 @@
         if (draggingNow() || (animLast && dt < 1 / 32)) { if (draggingNow()) animLast = now; animRaf = requestAnimationFrame(animateScopes); return; }
         animLast = now;
         var any = false;
-        if (vizByGroup.lfo1 && visible(vizByGroup.lfo1)) { if (!reduce) lfoPhase += dt * (0.15 + v("lfo1_rate", 64) / 127 * 2.2); drawViz("lfo1"); any = true; }
-        if (vizByGroup.lfo2 && visible(vizByGroup.lfo2)) { if (!reduce) lfo2Phase += dt * (0.15 + v("lfo2_rate", 64) / 127 * 2.2); drawViz("lfo2"); any = true; }
+        if (vizByGroup.lfo1 && visible(vizByGroup.lfo1)) { if (!reduce) lfoPhase += dt * lfo1Hz(); drawViz("lfo1"); any = true; }
+        /* the lever's LFO stands still while the lever is at rest: that is what it does */
+        if (vizByGroup.lfo2 && visible(vizByGroup.lfo2)) { if (!reduce && S.mod_lever > 0) lfo2Phase += dt * (0.15 + v("lfo2_rate", 64) / 127 * 2.2); drawViz("lfo2"); any = true; }
         if (any && !reduce && T.cur !== "presets" && T.cur !== "system") animRaf = requestAnimationFrame(animateScopes);
     }
     function drawTone(c) {
@@ -1488,7 +1653,7 @@
             g.fillText((pt[0] === "up" ? "UPPER" : "LOWER") + "  ch " + chName + "  " + (pt[1] > 0 ? "+" : "") + pt[1] + " st", x0 + 86 > w - 60 ? x0 - 96 : x0 + 86, pt[4] + 8);
         });
         g.fillStyle = "rgba(255,255,255,0.5)"; g.fillRect(Math.round(w / 2) - 0.5, 8, 1, h - 22);
-        label(g, h, "TRANSPOSE   " + (v("up_delay_sync", 0) || v("lo_delay_sync", 0) ? "delay sync on" : "no sync"));
+        label(g, h, "TRANSPOSE");
     }
     function drawTrig(c) {
         if (!visible(c)) return;

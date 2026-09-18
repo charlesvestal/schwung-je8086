@@ -230,6 +230,7 @@ select {
 .rows.focus .knob { width: 64px; height: 64px; }
 .rows.focus .big .knob { width: 84px; height: 84px; }
 .rows.focus .cell { width: 76px; }
+.rows.focus .cell.leds { width: auto; }     /* an LED column is as wide as its longest word */
 .rows.focus .cell.big { width: 92px; }
 .rows.focus .cell.select { width: 170px; }
 .rows.focus .parts-grid .cell.select { width: 100%; }
@@ -430,7 +431,24 @@ select {
 }
 .cells .env { display: flex; gap: 6px; padding: 0 2px; }
 .cells .env .cell { width: 34px; }
-.cells .stack { display: flex; flex-direction: column; gap: 8px; }
+/* a stack: a knob with the option that qualifies it directly beneath */
+.cells .stack { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.cells .stack .cell.leds { min-width: 0; }
+.cells .stack .cell.leds .label { text-align: center; }
+.cells .stack .cell.select { width: 100%; max-width: 160px; }
+.cells .stack .group { width: auto; }
+.cells .stack .group.tight .cells { gap: 8px 10px; flex-wrap: nowrap; }
+.cells .stack .cell.leds.quiet { opacity: 0.7; }
+/* a group: one row of a section that wraps as a unit, captioned or not */
+.cells .group { width: 100%; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cells .group + .group { border-top: 1px solid var(--rule-soft); padding-top: 8px; }
+.cells .group .gl { font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--legend-3); }
+.cells .group .cells { gap: 8px 10px; align-items: flex-start; }
+
+/* LFO 2's three depths side by side; the one Depth Select addresses is marked */
+.cells .lfo2depths { display: flex; gap: 8px; }
+.cells .lfo2depths .cell { width: 64px; }
+.cells .lfo2depths .cell.selected .label::after { content: " \25c6"; color: var(--lcd-dim); font-size: 8px; }
 
 .cell {
     display: flex; flex-direction: column; align-items: center; gap: 3px;
@@ -450,6 +468,16 @@ select {
 }
 .cell.pending .value { color: var(--lcd); }
 .cell.perpart .label::before { content: attr(data-part); color: var(--legend-3); margin-right: 4px; }
+/* a knob the firmware ignores right now (Rate under LFO 1 tempo sync, Time
+ * under delay sync): still readable, visibly out of the circuit */
+.cell.inert { opacity: 0.42; }
+.cell.inert .label::after { content: " \00b7 synced"; color: var(--lcd-dim); text-transform: none; letter-spacing: 0; }
+/* the modulation lever: a slider that springs back when released */
+.cell.lever .slider { cursor: ns-resize; }
+.cell.lever .value { color: var(--legend-3); }
+.cell.lever.engaged .value { color: var(--lcd); }
+.cell.lever.engaged .slider .fill { opacity: 0.95; }
+.cell.lever.latched .slider .capel { box-shadow: 0 0 0 1px var(--lcd), 0 2px 4px rgba(0, 0, 0, 0.6); }
 
 /* knob: SVG, rotated pointer, 270 degree travel */
 .knob {
@@ -507,6 +535,9 @@ select {
 
 /* LED option lists (waveform selectors, type switches) */
 .leds { display: flex; flex-direction: column; gap: 2px; align-items: stretch; width: auto; min-width: 92px; }
+.leds .opt .txt { white-space: nowrap; }
+/* no double-tap zoom on anything that takes a double-tap */
+.cell, .btn, .leds .opt, .cell select, .cell .label { touch-action: manipulation; }
 .leds .opts { display: flex; flex-direction: column; gap: 2px; }
 .leds .label { text-align: left; }
 .leds .opt {

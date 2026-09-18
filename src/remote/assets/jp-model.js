@@ -167,17 +167,47 @@
 
     var PANEL = [
         { id: "row-top", sections: [
+            /* The panel has no LFO 1 depth in the LFO 1 section: the amounts
+             * sit in OSC Common, Filter and Amp (and Control 2 on the PWM and
+             * TRI MOD waves). A patch with all of those at zero -- INIT PATCH
+             * is one -- makes waveform, rate and fade inaudible, which was
+             * reported as the LFOs being broken. So this section departs from
+             * the panel: the three depth knobs live HERE, with the Amp LFO 1
+             * PAN switch that decides what the Amp depth means (OFF: LFO 1
+             * tremolo, auto pan, or a manual pan position). */
             { id: "lfo1", title: "LFO 1", num: 1, viz: "lfo1", items: [
-                K("lfo1_waveform", "leds", { label: "Waveform" }),
-                K("lfo1_rate", "knob", { label: "Rate" }),
-                K("lfo1_fade", "knob", { label: "Fade" }),
-                K("lfo1_env_dest", "leds", { label: "LFO1 & Env Dest" }),
+                /* Source, then destinations. Each destination is a STACK: the
+                 * amount with the option that qualifies it directly beneath --
+                 * OSC depth with which oscillator it bends, Amp depth with what
+                 * it means (OFF = LFO 1 tremolo, AUTO = auto pan, MANUAL = a
+                 * pan position). Tempo Sync sits under Rate because it replaces
+                 * it. Sized to the ~390px a section gets on an iPad. */
+                { widget: "group", items: [
+                    K("lfo1_waveform", "leds", { label: "Waveform" }),
+                    { widget: "stack", items: [
+                        { widget: "group", cls: "tight", items: [
+                            K("lfo1_rate", "knob", { label: "Rate" }),
+                            K("lfo1_fade", "knob", { label: "Fade" }),
+                        ]},
+                        K("lfo1_sync", "select", { label: "Tempo Sync", perPart: true, inert: "lfo1_rate" }),
+                    ]},
+                ]},
+                { widget: "group", label: "Destinations", items: [
+                    { widget: "stack", items: [
+                        K("osc_lfo1_depth", "knob", { label: "OSC Pitch" }),
+                        K("lfo1_env_dest", "leds", { label: "Target" }),
+                    ]},
+                    K("filter_lfo1_depth", "knob", { label: "Filter" }),
+                    { widget: "stack", items: [
+                        K("amp_lfo1_depth", "knob", { label: "Amp" }),
+                        K("amp_lfo1_mode", "leds", { label: "Pan" }),
+                    ]},
+                ]},
             ]},
             { id: "osccommon", title: "OSC Common", num: 2, viz: "penv", items: [
                 K("ring_mod", "switch", { label: "Ring" }),
                 K("cross_mod_depth", "knob", { label: "X-Mod Depth" }),
                 K("osc_balance", "knob", { label: "Osc Balance" }),
-                K("osc_lfo1_depth", "knob", { label: "LFO 1 Depth" }),
                 K("pitch_env_depth", "knob", { label: "Env Depth" }),
                 K("pitch_env_attack", "knob", { label: "Env A" }),
                 K("pitch_env_decay", "knob", { label: "Env D" }),
@@ -212,7 +242,6 @@
                 K("cutoff", "knob", { label: "Cutoff", big: true }),
                 K("resonance", "knob", { label: "Resonance" }),
                 K("key_follow", "knob", { label: "Key Follow" }),
-                K("filter_lfo1_depth", "knob", { label: "LFO 1 Depth" }),
                 K("filter_env_depth", "knob", { label: "Env Depth" }),
                 K("filter_attack", "slider", { label: "A", group: "env" }),
                 K("filter_decay", "slider", { label: "D", group: "env" }),
@@ -220,8 +249,6 @@
                 K("filter_release", "slider", { label: "R", group: "env" }),
             ]},
             { id: "amp", title: "Amp", num: 6, viz: "aenv", items: [
-                K("amp_lfo1_depth", "knob", { label: "LFO 1 Depth" }),
-                K("amp_lfo1_mode", "leds", { label: "Pan" }),
                 K("amp_level", "knob", { label: "Level", big: true }),
                 K("amp_attack", "slider", { label: "A", group: "env" }),
                 K("amp_decay", "slider", { label: "D", group: "env" }),
@@ -244,12 +271,14 @@
             { id: "chorus", title: "Chorus", num: 8, viz: "chorus", items: [
                 K("chorus_level", "knob", { label: "Level" }),
                 K("chorus_type", "select", { label: "Type" }),
+                K("chorus_sync", "select", { label: "Tempo Sync", perPart: true }),
             ]},
             { id: "delay", title: "Delay", num: 9, viz: "delay", items: [
                 K("delay_time", "knob", { label: "Time" }),
                 K("delay_feedback", "knob", { label: "Feedback" }),
                 K("delay_level", "knob", { label: "Level" }),
                 K("delay_type", "select", { label: "Type" }),
+                K("delay_sync", "select", { label: "Tempo Sync", perPart: true, inert: "delay_time" }),
             ]},
         ]},
         { id: "row-left", sections: [
@@ -263,12 +292,24 @@
                 { widget: "drawer", id: "ribbon", label: "Ribbon Assign", prefix: "ctl_" },
                 { widget: "drawer", id: "velocity", label: "Velocity Assign", prefix: "vel_" },
             ]},
-            { id: "lfo2", title: "LFO 2", num: 21, viz: "lfo2", items: [
-                K("lfo2_rate", "knob", { label: "Rate" }),
-                K("lfo2_depth_select", "leds", { label: "Depth Select" }),
+            /* LFO 2 is the MODULATION LEVER's LFO: the depths are how much the
+             * lever applies, and with the lever at rest it is silent at any
+             * rate (measured: lfo2_rate 76 -> 20 rendered byte-identical audio
+             * until CC1 was held). Move has no lever, so the section carries
+             * one -- a plugin control that sends CC1, not a patch byte. */
+            { id: "lfo2", title: "LFO 2 \u00b7 Mod Lever", num: 21, viz: "lfo2", items: [
+                { widget: "group", items: [
+                    K("lfo2_rate", "knob", { label: "Rate" }),
+                    { widget: "lever", key: "mod_lever", label: "Mod Lever" },
+                ]},
                 /* ONE depth knob and a selector on the panel; three bytes in the
-                 * sysex. The knob follows the selector; the other two show. */
-                { widget: "lfo2depth", keys: ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"], label: "Depth" },
+                 * sysex, and all three are heard -- the selector only says which
+                 * of them the hardware's own Depth knob edits, so it is demoted
+                 * to a small column beside the three. */
+                { widget: "group", label: "Destinations \u2014 all apply, the lever sets how much", items: [
+                    { widget: "lfo2depth", keys: ["pitch_lfo2_depth", "filter_lfo2_depth", "amp_lfo2_depth"], label: "Depth" },
+                    K("lfo2_depth_select", "leds", { label: "Panel Knob", cls: "quiet", title: "Which depth the JP-8000's own Depth knob edits" }),
+                ]},
             ]},
             { id: "keyboard", title: "Keyboard", num: 22, viz: "porta", items: [
                 K("portamento", "switch", { label: "Portamento" }),
@@ -280,12 +321,11 @@
             ]},
         ]},
         { id: "row-parts", sections: [
+            /* The three tempo-sync settings are part parameters too, but they
+             * live with LFO 1, Chorus and Delay, where they are looked for. */
             { id: "parts", title: "Parts", viz: "parts", parts: true, items: [
                 K("midi_ch", "select", { label: "MIDI Ch", perPart: true }),
                 K("transpose", "knob", { label: "Transpose", perPart: true }),
-                K("delay_sync", "select", { label: "Delay Sync", perPart: true }),
-                K("lfo1_sync", "select", { label: "LFO 1 Sync", perPart: true }),
-                K("chorus_sync", "select", { label: "Chorus Sync", perPart: true }),
             ]},
             { id: "trigger", title: "Ext Trigger", viz: "trig", items: [
                 K("trigger_switch", "switch", { label: "Trigger" }),
@@ -353,15 +393,19 @@
         var keys = [];
         PANEL.forEach(function (row) {
             row.sections.forEach(function (s) {
-                s.items.forEach(function (it) {
+                var walk = function (it) {
+                    if (it.widget === "group" || it.widget === "stack") { it.items.forEach(walk); return; }
                     if (it.widget === "drawer") {
                         drawerGroups(it.prefix).forEach(function (g) { keys.push.apply(keys, g.keys); });
                     } else if (it.widget === "lfo2depth") {
                         keys.push.apply(keys, it.keys);
+                    } else if (it.widget === "lever") {
+                        /* a plugin control (CC1), not a temp byte */
                     } else if (it.perPart) {
                         keys.push(partKey(it, 0), partKey(it, 1));
                     } else keys.push(it.key);
-                });
+                };
+                s.items.forEach(walk);
             });
         });
         SYSTEM.forEach(function (g) { keys.push.apply(keys, g.keys); });

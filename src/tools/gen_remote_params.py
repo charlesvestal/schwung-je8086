@@ -68,7 +68,7 @@ for row in table:
     params.append(p)
 
 # Plugin-side controls that are not sysex parameters but the page drives.
-extra = [meta[k] for k in ("mode", "part", "buffer_ms") if k in meta]
+extra = [meta[k] for k in ("mode", "part", "buffer_ms", "mod_lever") if k in meta]
 
 # The system-area byte order `state_get` uses for "sys": one byte per exposed
 # system parameter, in TABLE order. Recorded here so the decoder cannot drift.
