@@ -35,6 +35,8 @@
 #include <stdarg.h>
 #include <time.h>
 #include <pthread.h>
+#include <spawn.h>
+#include <fcntl.h>
 #include <algorithm>
 #include <vector>
 #include <string>
@@ -412,6 +414,11 @@ struct jp8000_shm_t {
     int load_bank;
     int load_index;
     int load_part;    /* 0 upper, 1 lower, 2 both (patch loads only) */
+    /* Every process of the pipeline, stage 0 (the DSP process itself)
+     * first. The pipeline boots and restores its state at SCHED_OTHER; the
+     * parent -- which keeps CAP_SYS_NICE, lost by the exec'd process --
+     * raises each of these to FIFO when it is ready (raise_pipeline). */
+    volatile int stage_pids[JE_MAX_STAGES];
 };
 
 /* =====================================================================
@@ -460,11 +467,7 @@ static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t 
 }
 
 /*
- * Scheduling policy of the DSP processes. The child is forked from whatever
- * thread called create_instance, and inherits its class: the SPI callback
- * (FIFO 70) on older hosts, Schwung's SCHED_OTHER slot loader on hosts that
- * load modules off the callback, SCHED_OTHER under plugin_drive run as
- * `ableton`.
+ * Scheduling policy of the DSP processes.
  *
  * Measured 2026-09-02 on the device at 1.15x with Move running: SCHED_OTHER
  * stages get preempted by MoveOriginal's main thread (~45-90% of a core) for
@@ -473,62 +476,21 @@ static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t 
  * `Link Main` (35) and starves Link Audio delivery — the "fork" entry in the
  * 2026-08-22 RT thread audit was this module.
  *
- * So the child ASKS for JP8000_RT_PRIO rather than taking what it inherited:
- * an inherited FIFO above it is clamped down, and an inherited SCHED_OTHER is
- * raised to it. The stages fork from this process later and inherit whatever
- * this leaves in place.
- *
- * Raising needs privilege. MoveOriginal runs as `ableton` with RLIMIT_RTPRIO
- * 0 but WITH CAP_SYS_NICE effective on every thread (CapEff 0x1804000,
- * measured 2026-10-02), and fork keeps capabilities, so the request succeeds
- * there — as minijv's emu thread and osirus's DSP child already rely on.
- * plugin_drive run by hand as `ableton` has no CAP_SYS_NICE: the request is
- * refused there, and the child stays SCHED_OTHER exactly as it did before.
- * Inheriting would have put the emulator at SCHED_OTHER on a host that loads
- * off the callback, which underran 4 runs in 6 (above).
+ * So the RENDERING pipeline runs at JP8000_RT_PRIO -- but only once it is
+ * ready. The DSP process is spawned and exec'd (spawn_dsp_process), boots and
+ * restores its state at SCHED_OTHER (child_main says why: at FIFO that work
+ * pushed core 3 through the RT throttle), and the parent then raises every
+ * process of the pipeline (raise_pipeline). The parent must do it: raising
+ * needs CAP_SYS_NICE, which MoveOriginal holds (CapEff 0x1804000, measured
+ * 2026-10-02, despite RLIMIT_RTPRIO 0 for `ableton`) but which does not
+ * survive the exec. Under plugin_drive run by hand there is no CAP_SYS_NICE;
+ * the raise is refused and the pipeline stays SCHED_OTHER.
  */
 #define JP8000_RT_PRIO 20
-/* Experiment switch (not a setting): with this file present the stages leave
- * the realtime class entirely, so the in-host cost of SCHED_OTHER can be
- * measured against the FIFO 20 number above. Checked once per stage. */
+/* Experiment switch (not a setting): with this file present the pipeline is
+ * never raised to the realtime class, so the in-host cost of SCHED_OTHER can
+ * be measured against the FIFO 20 number above. */
 #define JP8000_SCHED_OTHER_ARM_FILE "/data/UserData/schwung/jp8000_sched_other_on"
-static void child_clamp_realtime(jp8000_shm_t *shm) {
-    (void)shm;
-#ifdef __linux__
-    const int pol = sched_getscheduler(0);
-    struct sched_param sp{};
-    sched_getparam(0, &sp);
-    if (pol != SCHED_FIFO && pol != SCHED_RR) {
-        if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) {
-            vlog("[child] sched: inherited SCHED_OTHER, kept by arming file");
-            return;
-        }
-        sp.sched_priority = JP8000_RT_PRIO;
-        const int rc = sched_setscheduler(0, SCHED_FIFO, &sp);
-        sched_getparam(0, &sp);  /* verify, as below */
-        vlog("[child] sched: inherited SCHED_OTHER -> asked FIFO %d (rc=%d, now pol=%d prio=%d)",
-             JP8000_RT_PRIO, rc, sched_getscheduler(0), sp.sched_priority);
-        return;
-    }
-    if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) {
-        struct sched_param other{};
-        const int rc = sched_setscheduler(0, SCHED_OTHER, &other);
-        vlog("[child] sched: inherited FIFO %d -> SCHED_OTHER by arming file (rc=%d, now pol=%d)",
-             sp.sched_priority, rc, sched_getscheduler(0));
-        return;
-    }
-    if (sp.sched_priority <= JP8000_RT_PRIO) {
-        vlog("[child] sched: inherited FIFO %d, leaving it", sp.sched_priority);
-        return;
-    }
-    const int inherited = sp.sched_priority;
-    sp.sched_priority = JP8000_RT_PRIO;
-    const int rc = sched_setscheduler(0, SCHED_FIFO, &sp);
-    sched_getparam(0, &sp);  /* verify: sched_setscheduler has failed silently on this device before */
-    vlog("[child] sched: inherited FIFO %d -> FIFO %d (rc=%d, now %d)", inherited, JP8000_RT_PRIO, rc, sp.sched_priority);
-#endif
-}
-
 /* Wait for a cross-process condition: spin briefly (the other side is one
  * sample away most of the time), then back off to usleep so an idle core is
  * not burned while the parent throttles on the audio ring.
@@ -822,6 +784,7 @@ struct jp8000_instance_t {
      * Move: one 8 MB region per JE-8086 instance, +9 MB per set switch. */
     int boot_thread_started;
     int pipeline_lock_fd;   /* see JP8000_PIPELINE_LOCK */
+    int shm_fd;             /* memfd backing `shm`; handed to the DSP process */
     dc_block_t dc[2];
 
     /* UI state, parent-only. `mode` is a UI fact (which browser is shown);
@@ -1336,7 +1299,23 @@ static void child_main(jp8000_shm_t *shm) {
     g_vlog = nullptr; /* reopen in child */
 
     vlog("[child] started, pid=%d", (int)getpid());
-    child_clamp_realtime(shm);
+    /* BOOT AT SCHED_OTHER. The boot -- ROM load, snapshot restore, ~2 s of
+     * warm-up emulation -- is seconds of CPU at full speed, unpinned. At FIFO
+     * 20 it took 81-86% of whichever core the scheduler chose, measured on a
+     * Move: during a set switch, with cores 1 and 2 already busy, that was
+     * core 3, the SPI callback's. Core 3 then crossed the RT throttle (950
+     * ms/s) and the kernel parked every realtime task on it for the rest of
+     * the period -- the callback included: one ~50 ms audio frame on every
+     * set switch involving this module. The same holds after the boot while
+     * the set's saved patch is applied (the boot thread waits up to 4 s for
+     * the firmware to confirm it, with the emulator running flat out). So
+     * the whole pipeline -- this process and the stages it forks, which
+     * inherit the class -- stays at SCHED_OTHER until the instance is ready,
+     * and the parent raises it then (raise_pipeline). */
+    {
+        struct sched_param other{};
+        sched_setscheduler(0, SCHED_OTHER, &other);
+    }
 
     /* Don't pin cores during boot — let OS schedule freely.
      * Core pinning happens after boot, before real-time DSP work. */
@@ -1468,7 +1447,9 @@ static void child_main(jp8000_shm_t *shm) {
             _exit(0);
         }
         stage_pid[s] = pid;
+        shm->stage_pids[s] = pid;
     }
+    shm->stage_pids[0] = getpid();
 
     /* === STAGE 0 (this process): H8S + ASICs [0, b1) === */
     for (int s = 1; s < shm->num_stages; s++) vlog("[child] stage%d pid=%d", s, (int)stage_pid[s]);
@@ -1756,6 +1737,96 @@ static void child_main(jp8000_shm_t *shm) {
  * Boot / fork helpers (parent plugin process)
  * ===================================================================== */
 
+/*
+ * THE DSP PROCESS IS SPAWNED, NOT FORKED FROM THE HOST.
+ *
+ * fork() made it a copy-on-write copy of MoveOriginal -- ~700 MB, every page
+ * mlock'd -- and from that moment every page the host's audio thread wrote
+ * was shared with the child, so its next write to it faulted and copied it.
+ * Measured on a Move: ~8,150 page faults on the SPI callback per JE-8086
+ * load (Mini-JV: under 10). Alone they cost nothing visible (worst frame
+ * 3.5 ms). During a set switch, while Move's own set load holds the
+ * process's memory-map lock, each one waits for it, and they added up to one
+ * ~50 ms audio frame on every switch involving this module -- gone, with the
+ * same sets, when JE-8086 was swapped for a module that does not fork.
+ *
+ * posix_spawn is vfork + exec: nothing is shared with the host, so nothing
+ * is copied. The helper (jp8000-dsp, beside dsp.so) dlopens this same dsp.so
+ * and calls jp8000_child_entry with the shm memfd on fd 3, so child_main and
+ * everything after it -- including the stages, which still FORK, now from a
+ * small process -- is unchanged.
+ *
+ * What a fork carried implicitly, the spawn has to state:
+ *   - the shm block: a memfd, dup'd to fd 3.
+ *   - the pipeline lock: its fd dup'd to fd 4, so the DSP process and its
+ *     stages hold the flock exactly as before (released by the last exit).
+ *   - SCHED_FIFO: exec drops CAP_SYS_NICE (MoveOriginal runs as `ableton`
+ *     with RLIMIT_RTPRIO 0), so the process cannot raise itself. It boots at
+ *     SCHED_OTHER anyway (child_main), and the parent -- which keeps the
+ *     capability -- raises the whole pipeline once it is ready
+ *     (raise_pipeline).
+ *   - the environment, minus LD_PRELOAD: the host runs under Schwung's shim,
+ *     which must not load into this process.
+ *   - signals: all dispositions reset to default and the mask cleared, rather
+ *     than inheriting whatever the calling thread had.
+ */
+extern "C" __attribute__((visibility("default"))) int jp8000_child_entry(int shm_fd) {
+    void *p = mmap(nullptr, sizeof(jp8000_shm_t), PROT_READ | PROT_WRITE,
+                   MAP_SHARED, shm_fd, 0);
+    if (p == MAP_FAILED) return 1;
+    child_main((jp8000_shm_t*)p);
+    return 0;
+}
+
+extern char **environ;
+
+/* Move an fd out of the 3..4 range the child expects, so a dup2 onto itself
+ * (which would keep FD_CLOEXEC set) cannot happen. */
+static int fd_above_4(int fd) {
+    if (fd < 0 || fd > 4) return fd;
+    int moved = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+    return moved >= 0 ? moved : fd;
+}
+
+static pid_t spawn_dsp_process(jp8000_instance_t *inst) {
+    jp8000_shm_t *shm = inst->shm;
+    char helper[sizeof(shm->module_dir) + 32], dsp[sizeof(shm->module_dir) + 32];
+    snprintf(helper, sizeof(helper), "%s/jp8000-dsp", (const char*)shm->module_dir);
+    snprintf(dsp, sizeof(dsp), "%s/dsp.so", (const char*)shm->module_dir);
+
+    const int shm_fd = fd_above_4(inst->shm_fd);
+    const int lock_fd = fd_above_4(inst->pipeline_lock_fd);
+
+    std::vector<char*> envp;
+    for (char **e = environ; e && *e; e++)
+        if (strncmp(*e, "LD_PRELOAD=", 11) != 0) envp.push_back(*e);
+    envp.push_back(nullptr);
+    char *argv[] = { helper, dsp, nullptr };
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, shm_fd, 3);
+    if (lock_fd >= 0) posix_spawn_file_actions_adddup2(&fa, lock_fd, 4);
+
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setsigmask(&at, &none);
+    posix_spawnattr_setsigdefault(&at, &all);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    pid_t pid = -1;
+    const int rc = posix_spawn(&pid, helper, &fa, &at, argv, envp.data());
+    posix_spawnattr_destroy(&at);
+    vlog("spawn_dsp_process: rc=%d pid=%d", rc, (int)pid);
+    posix_spawn_file_actions_destroy(&fa);
+    if (shm_fd != inst->shm_fd) close(shm_fd);
+    if (lock_fd != inst->pipeline_lock_fd) close(lock_fd);
+    if (rc != 0) { errno = rc; return -1; }
+    return pid;
+}
+
 static int fork_and_wait_child(jp8000_instance_t *inst) {
     jp8000_shm_t *shm = inst->shm;
     fprintf(stderr, "JP-8000: fork_and_wait starting...\n");
@@ -1771,18 +1842,12 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
         return -1;
     }
 
-    pid_t pid = fork();
+    pid_t pid = spawn_dsp_process(inst);
     if (pid < 0) {
         snprintf((char*)shm->load_error, sizeof(shm->load_error),
-                 "fork() failed: %s", strerror(errno));
+                 "could not start the DSP process: %s", strerror(errno));
         shm->initialized = 1; shm->loading_complete = 1;
         return -1;
-    }
-
-    if (pid == 0) {
-        g_vlog = nullptr;
-        child_main(shm);
-        _exit(0);
     }
 
     inst->child_pid = pid;
@@ -1837,6 +1902,23 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
 
 static void state_apply(jp8000_instance_t *inst, const char *s);
 
+/* The pipeline has booted and taken its state: give every process of it the
+ * realtime class (see child_main). The parent can, the exec'd processes
+ * cannot -- CAP_SYS_NICE does not survive the exec. Arming file aside, a
+ * refusal leaves them at SCHED_OTHER and is logged. */
+static void raise_pipeline(jp8000_instance_t *inst) {
+    if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) return;
+    jp8000_shm_t *shm = inst->shm;
+    struct sched_param sp{};
+    sp.sched_priority = JP8000_RT_PRIO;
+    for (int s = 0; s < shm->num_stages && s < JE_MAX_STAGES; s++) {
+        const int pid = shm->stage_pids[s];
+        if (pid <= 0) continue;
+        const int rc = sched_setscheduler(pid, SCHED_FIFO, &sp);
+        vlog("raise_pipeline: stage%d pid=%d -> FIFO %d (rc=%d)", s, pid, JP8000_RT_PRIO, rc);
+    }
+}
+
 static void* boot_thread_func(void *arg) {
     jp8000_instance_t *inst = (jp8000_instance_t*)arg;
     fprintf(stderr, "JP-8000: boot thread starting, module_dir=%s\n", inst->shm->module_dir);
@@ -1875,6 +1957,7 @@ static void* boot_thread_func(void *arg) {
             inst->shm->patch_bank_req = inst->bank;
             inst->shm->perf_bank_req = inst->perf_bank;
         }
+        raise_pipeline(inst);
         SHM_STORE_FENCE();
         inst->ui_ready = 1;
     }
@@ -1941,10 +2024,20 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     }
     if (!inst) return nullptr;
 
+    /* A memfd rather than anonymous shared memory: the DSP process is
+     * spawned and exec'd (see spawn_dsp_process), so it can only reach this
+     * block through a descriptor it is handed. */
+    inst->shm_fd = memfd_create("jp8000-shm", MFD_CLOEXEC);
+    if (inst->shm_fd < 0 || ftruncate(inst->shm_fd, sizeof(jp8000_shm_t)) != 0) {
+        if (inst->shm_fd >= 0) close(inst->shm_fd);
+        free(inst);
+        return nullptr;
+    }
     inst->shm = (jp8000_shm_t*)mmap(nullptr, sizeof(jp8000_shm_t),
                                      PROT_READ | PROT_WRITE,
-                                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                                     MAP_SHARED, inst->shm_fd, 0);
     if (inst->shm == MAP_FAILED) {
+        close(inst->shm_fd);
         free(inst);
         return nullptr;
     }
@@ -2001,6 +2094,7 @@ static void v2_destroy_instance(void *instance) {
 
     if (inst->shm && inst->shm != MAP_FAILED)
         munmap(inst->shm, sizeof(jp8000_shm_t));
+    if (inst->shm_fd >= 0) close(inst->shm_fd);
 
     free(inst);
     fprintf(stderr, "JP-8000: destroyed\n");
