@@ -462,8 +462,9 @@ static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t 
 /*
  * Scheduling policy of the DSP processes. The child is forked from whatever
  * thread called create_instance, and inherits its class: the SPI callback
- * (FIFO 70) on today's chain host, a FIFO 20 loader once schwung#303 lands,
- * SCHED_OTHER under plugin_drive run as `ableton`.
+ * (FIFO 70) on older hosts, Schwung's SCHED_OTHER slot loader on hosts that
+ * load modules off the callback, SCHED_OTHER under plugin_drive run as
+ * `ableton`.
  *
  * Measured 2026-09-02 on the device at 1.15x with Move running: SCHED_OTHER
  * stages get preempted by MoveOriginal's main thread (~45-90% of a core) for
@@ -472,11 +473,19 @@ static void uc_write_ring_push(je_stage_t *st, int asic, uint32_t addr, uint8_t 
  * `Link Main` (35) and starves Link Audio delivery — the "fork" entry in the
  * 2026-08-22 RT thread audit was this module.
  *
- * So: an inherited realtime priority is CLAMPED to JP8000_RT_PRIO, never
- * raised and never dropped to SCHED_OTHER. MoveOriginal runs as `ableton`
- * with RLIMIT_RTPRIO 0, so a process that leaves the realtime class cannot
- * come back; and the stages fork from this process later and inherit
- * whatever this leaves in place.
+ * So the child ASKS for JP8000_RT_PRIO rather than taking what it inherited:
+ * an inherited FIFO above it is clamped down, and an inherited SCHED_OTHER is
+ * raised to it. The stages fork from this process later and inherit whatever
+ * this leaves in place.
+ *
+ * Raising needs privilege. MoveOriginal runs as `ableton` with RLIMIT_RTPRIO
+ * 0 but WITH CAP_SYS_NICE effective on every thread (CapEff 0x1804000,
+ * measured 2026-10-02), and fork keeps capabilities, so the request succeeds
+ * there — as minijv's emu thread and osirus's DSP child already rely on.
+ * plugin_drive run by hand as `ableton` has no CAP_SYS_NICE: the request is
+ * refused there, and the child stays SCHED_OTHER exactly as it did before.
+ * Inheriting would have put the emulator at SCHED_OTHER on a host that loads
+ * off the callback, which underran 4 runs in 6 (above).
  */
 #define JP8000_RT_PRIO 20
 /* Experiment switch (not a setting): with this file present the stages leave
@@ -487,12 +496,20 @@ static void child_clamp_realtime(jp8000_shm_t *shm) {
     (void)shm;
 #ifdef __linux__
     const int pol = sched_getscheduler(0);
-    if (pol != SCHED_FIFO && pol != SCHED_RR) {
-        vlog("[child] sched: inherited SCHED_OTHER, leaving it");
-        return;
-    }
     struct sched_param sp{};
     sched_getparam(0, &sp);
+    if (pol != SCHED_FIFO && pol != SCHED_RR) {
+        if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) {
+            vlog("[child] sched: inherited SCHED_OTHER, kept by arming file");
+            return;
+        }
+        sp.sched_priority = JP8000_RT_PRIO;
+        const int rc = sched_setscheduler(0, SCHED_FIFO, &sp);
+        sched_getparam(0, &sp);  /* verify, as below */
+        vlog("[child] sched: inherited SCHED_OTHER -> asked FIFO %d (rc=%d, now pol=%d prio=%d)",
+             JP8000_RT_PRIO, rc, sched_getscheduler(0), sp.sched_priority);
+        return;
+    }
     if (access(JP8000_SCHED_OTHER_ARM_FILE, F_OK) == 0) {
         struct sched_param other{};
         const int rc = sched_setscheduler(0, SCHED_OTHER, &other);
