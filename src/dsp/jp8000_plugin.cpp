@@ -814,6 +814,13 @@ struct jp8000_instance_t {
     pid_t child_pid;
     pthread_t boot_thread;
     volatile int boot_thread_running;
+    /* Whether a boot thread was CREATED, which is what decides that destroy
+     * owes it a join. boot_thread_running cannot say: the thread clears it on
+     * the way out, so gating the join on it skipped every thread that had
+     * finished booting -- i.e. every normal unload -- and an unjoined thread
+     * keeps its 8 MB stack mapped for the life of the process. Measured on a
+     * Move: one 8 MB region per JE-8086 instance, +9 MB per set switch. */
+    int boot_thread_started;
     int pipeline_lock_fd;   /* see JP8000_PIPELINE_LOCK */
     dc_block_t dc[2];
 
@@ -1781,8 +1788,12 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
     inst->child_pid = pid;
     vlog("fork_and_wait: child pid=%d", (int)pid);
 
-    /* Wait up to 120s for boot (JE device boot is slow) */
-    for (int i = 0; i < 1200 && !shm->child_ready; i++) {
+    /* Wait up to 120s for boot (JE device boot is slow) -- or until destroy
+     * asks for shutdown. destroy JOINS this thread, so a wait that ignored
+     * child_shutdown made unloading a still-booting instance block for the
+     * rest of the boot: 7.8 s measured on a Move, a set switch reloading the
+     * slot it had just loaded, holding Schwung's param channel throughout. */
+    for (int i = 0; i < 1200 && !shm->child_ready && !shm->child_shutdown; i++) {
         int status;
         pid_t res = waitpid(pid, &status, WNOHANG);
         if (res == pid) {
@@ -1806,6 +1817,11 @@ static int fork_and_wait_child(jp8000_instance_t *inst) {
         usleep(100000);
     }
 
+    if (!shm->child_ready && shm->child_shutdown) {
+        /* destroy is waiting on us; it kills the child itself. */
+        vlog("fork_and_wait: shutdown requested during boot");
+        return -1;
+    }
     if (!shm->child_ready) {
         snprintf((char*)shm->load_error, sizeof(shm->load_error), "DSP boot timed out (120s)");
         shm->initialized = 1; shm->loading_complete = 1;
@@ -1851,7 +1867,7 @@ static void* boot_thread_func(void *arg) {
              * -- is what the bug was. Bounded, because a firmware that never
              * answers must still yield a usable slot. */
             jp8000_shm_t *sh = inst->shm;
-            for (int i = 0; i < 400 && sh->temp_pending; i++) usleep(10000);
+            for (int i = 0; i < 400 && sh->temp_pending && !sh->child_shutdown; i++) usleep(10000);
             fprintf(stderr, "JP-8000: state restore %s\n",
                     sh->temp_pending ? "NOT confirmed by the firmware (timed out)"
                                      : "confirmed by the firmware");
@@ -1944,7 +1960,14 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     snprintf((char*)inst->shm->loading_status, sizeof(inst->shm->loading_status), "Initializing...");
 
     inst->boot_thread_running = 1;
-    pthread_create(&inst->boot_thread, nullptr, boot_thread_func, inst);
+    if (pthread_create(&inst->boot_thread, nullptr, boot_thread_func, inst) == 0) {
+        inst->boot_thread_started = 1;
+    } else {
+        inst->boot_thread_running = 0;
+        snprintf((char*)inst->shm->load_error, sizeof(inst->shm->load_error),
+                 "could not start the boot thread");
+        inst->shm->initialized = 1; inst->shm->loading_complete = 1;
+    }
     return inst;
 }
 
@@ -1956,8 +1979,12 @@ static void v2_destroy_instance(void *instance) {
 
     if (inst->shm) inst->shm->child_shutdown = 1;
 
-    if (inst->boot_thread_running)
+    /* Join whether or not it has finished (see boot_thread_started). The
+     * shutdown flag above makes a still-booting thread return promptly. */
+    if (inst->boot_thread_started) {
         pthread_join(inst->boot_thread, nullptr);
+        inst->boot_thread_started = 0;
+    }
 
     if (inst->child_pid > 0) {
         kill(inst->child_pid, SIGTERM);
