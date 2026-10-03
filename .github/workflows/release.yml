@@ -29,6 +29,9 @@ jobs:
         run: |
           test -f dist/jp8000-module.tar.gz
           file dist/jp8000/dsp.so | tee /dev/stderr | grep -q 'ARM aarch64'
+          # The DSP process the plugin spawns. Without it JE-8086 cannot start.
+          file dist/jp8000/jp8000-dsp | tee /dev/stderr | grep -q 'ARM aarch64'
+          tar tzf dist/jp8000-module.tar.gz | grep -q '^jp8000/jp8000-dsp$'
           # The tarball must contain a top-level jp8000/ or the Module Store
           # extracts into the wrong place.
           tar tzf dist/jp8000-module.tar.gz | head -1 | grep -q '^jp8000/'

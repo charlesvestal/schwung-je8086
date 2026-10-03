@@ -101,6 +101,11 @@ set_target_properties(jp8000-move-plugin PROPERTIES
     SUFFIX ".so"
 )
 
+# The DSP process (see spawn_dsp_process in jp8000_plugin.cpp). It links no
+# emulator code: it dlopens dsp.so and calls jp8000_child_entry.
+add_executable(jp8000-dsp src/dsp/jp8000_dsp_main.c)
+target_link_libraries(jp8000-dsp PRIVATE ${CMAKE_DL_LIBS})
+
 # ---- Benchmarks ----
 
 add_executable(bench_je src/benchmark/dsp_bench.cpp)
